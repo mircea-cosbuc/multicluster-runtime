@@ -1,52 +1,46 @@
 #!/bin/bash
 
-# Script to create a kubeconfig secret for the Multicluster Failover Operator
+# Script to create a kubeconfig secret for the pod lister controller
 
 set -e
 
 # Default values
-NAMESPACE="my-operator-namespace"
-KUBECONFIG_PATH="${HOME}/.kube/config"
+NAMESPACE="default"
+SERVICE_ACCOUNT="default"
 KUBECONFIG_CONTEXT=""
 SECRET_NAME=""
-DRY_RUN="false"
 
 # Function to display usage information
 function show_help {
   echo "Usage: $0 [options]"
-  echo "  -n, --name NAME         Name for the secret (will be used as cluster identifier)"
-  echo "  -s, --namespace NS      Namespace to create the secret in (default: ${NAMESPACE})"
-  echo "  -k, --kubeconfig PATH   Path to kubeconfig file (default: ${KUBECONFIG_PATH})"
-  echo "  -c, --context CONTEXT   Kubeconfig context to use (default: current-context)"
-  echo "  -d, --dry-run           Dry run, print YAML but don't apply"
-  echo "  -h, --help              Show this help message"
+  echo "  -c, --context CONTEXT    Kubeconfig context to use (required)"
+  echo "  --name NAME              Name for the secret (defaults to context name)"
+  echo "  -n, --namespace NS       Namespace to create the secret in (default: ${NAMESPACE})"
+  echo "  -a, --service-account SA Service account name to use (default: ${SERVICE_ACCOUNT})"
+  echo "  -h, --help               Show this help message"
   echo ""
-  echo "Example: $0 -n cluster1 -c prod-cluster -k ~/.kube/config"
+  echo "Example: $0 -c prod-cluster"
 }
 
 # Parse command line options
 while [[ $# -gt 0 ]]; do
   key="$1"
   case $key in
-    -n|--name)
+    --name)
       SECRET_NAME="$2"
       shift 2
       ;;
-    -s|--namespace)
+    -n|--namespace)
       NAMESPACE="$2"
-      shift 2
-      ;;
-    -k|--kubeconfig)
-      KUBECONFIG_PATH="$2"
       shift 2
       ;;
     -c|--context)
       KUBECONFIG_CONTEXT="$2"
       shift 2
       ;;
-    -d|--dry-run)
-      DRY_RUN="true"
-      shift 1
+    -a|--service-account)
+      SERVICE_ACCOUNT="$2"
+      shift 2
       ;;
     -h|--help)
       show_help
@@ -61,43 +55,81 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate required arguments
-if [ -z "$SECRET_NAME" ]; then
-  echo "ERROR: Secret name is required (-n, --name)"
+if [ -z "$KUBECONFIG_CONTEXT" ]; then
+  echo "ERROR: Kubeconfig context is required (-c, --context)"
   show_help
   exit 1
 fi
 
-if [ ! -f "$KUBECONFIG_PATH" ]; then
-  echo "ERROR: Kubeconfig file not found at: $KUBECONFIG_PATH"
+# Set secret name to context if not specified
+if [ -z "$SECRET_NAME" ]; then
+  SECRET_NAME="$KUBECONFIG_CONTEXT"
+fi
+
+# Get the cluster CA certificate from the remote cluster
+CLUSTER_CA=$(kubectl --context=${KUBECONFIG_CONTEXT} config view --raw --minify --flatten -o jsonpath='{.clusters[].cluster.certificate-authority-data}')
+if [ -z "$CLUSTER_CA" ]; then
+  echo "ERROR: Could not get cluster CA certificate"
   exit 1
 fi
 
-# Process the kubeconfig
-echo "Processing kubeconfig..."
+# Get the cluster server URL from the remote cluster
+CLUSTER_SERVER=$(kubectl --context=${KUBECONFIG_CONTEXT} config view --raw --minify --flatten -o jsonpath='{.clusters[].cluster.server}')
+if [ -z "$CLUSTER_SERVER" ]; then
+  echo "ERROR: Could not get cluster server URL"
+  exit 1
+fi
+
+# Get the service account token from the remote cluster
+SA_TOKEN=$(kubectl --context=${KUBECONFIG_CONTEXT} -n ${NAMESPACE} create token ${SERVICE_ACCOUNT} --duration=8760h)
+if [ -z "$SA_TOKEN" ]; then
+  echo "ERROR: Could not create service account token"
+  exit 1
+fi
+
+# Create a new kubeconfig using the service account token
+NEW_KUBECONFIG=$(cat <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+- name: ${SECRET_NAME}
+  cluster:
+    server: ${CLUSTER_SERVER}
+    certificate-authority-data: ${CLUSTER_CA}
+contexts:
+- name: ${SECRET_NAME}
+  context:
+    cluster: ${SECRET_NAME}
+    user: ${SERVICE_ACCOUNT}
+current-context: ${SECRET_NAME}
+users:
+- name: ${SERVICE_ACCOUNT}
+  user:
+    token: ${SA_TOKEN}
+EOF
+)
+
+# Save kubeconfig temporarily for testing
 TEMP_KUBECONFIG=$(mktemp)
-trap "rm -f $TEMP_KUBECONFIG" EXIT
+echo "$NEW_KUBECONFIG" > "$TEMP_KUBECONFIG"
 
-if [ -n "$KUBECONFIG_CONTEXT" ]; then
-  kubectl config view --raw --minify --flatten --context="$KUBECONFIG_CONTEXT" > "$TEMP_KUBECONFIG"
-  if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to extract context '$KUBECONFIG_CONTEXT' from kubeconfig"
-    exit 1
-  fi
-  echo "Extracted context '$KUBECONFIG_CONTEXT' from kubeconfig"
-else
-  cp "$KUBECONFIG_PATH" "$TEMP_KUBECONFIG"
-  echo "Using entire kubeconfig file"
+# Verify the kubeconfig works
+echo "Verifying kubeconfig..."
+if ! kubectl --kubeconfig="$TEMP_KUBECONFIG" get pods -A &>/dev/null; then
+  rm "$TEMP_KUBECONFIG"
+  echo "ERROR: Failed to verify kubeconfig - unable to list pods."
+  echo "- Ensure that the service account '${NAMESPACE}/${SERVICE_ACCOUNT}' on cluster '${KUBECONFIG_CONTEXT}' has the necessary permissions to list pods."
+  echo "- You may specify a namespace using the -n flag."
+  echo "- You may specify a service account using the -a flag."
+  exit 1
 fi
+echo "Kubeconfig verified successfully!"
 
-# Encode the kubeconfig
-KUBECONFIG_B64=$(base64 < "$TEMP_KUBECONFIG" | tr -d '\n')
+# Encode the verified kubeconfig
+KUBECONFIG_B64=$(cat "$TEMP_KUBECONFIG" | base64 -w0)
+rm "$TEMP_KUBECONFIG"
 
-# Create the namespace if it doesn't exist
-if [ "$DRY_RUN" != "true" ]; then
-  kubectl get namespace "$NAMESPACE" &>/dev/null || kubectl create namespace "$NAMESPACE"
-fi
-
-# Generate the secret YAML
+# Generate and apply the secret
 SECRET_YAML=$(cat <<EOF
 apiVersion: v1
 kind: Secret
@@ -112,12 +144,8 @@ data:
 EOF
 )
 
-# Apply or print the secret
-if [ "$DRY_RUN" == "true" ]; then
-  echo "# YAML that would be applied:"
-  echo "$SECRET_YAML"
-else
-  echo "$SECRET_YAML" | kubectl apply -f -
-  echo "Secret '${SECRET_NAME}' created in namespace '${NAMESPACE}'"
-  echo "The operator should now discover and connect to this cluster"
-fi 
+echo "Creating kubeconfig secret..."
+echo "$SECRET_YAML" | kubectl apply -f -
+
+echo "Secret '${SECRET_NAME}' created in namespace '${NAMESPACE}'"
+echo "The operator should now be able to discover and connect to this cluster" 
