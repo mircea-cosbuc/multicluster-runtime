@@ -10,13 +10,18 @@
 
 <img src="./contrib/logo/logo.png" width="300"/>
 
-## Multi cluster controllers with controller-runtime
+## Multi-Cluster Controllers with controller-runtime
 
+multicluster-runtime is a Go library to write Kubernetes controllers that reconcile across a dynamic fleet of Kubernetes (or Kubernetes-like) clusters.
+
+- **dynamic fleet orchestration**: So-called providers interact with multi-cluster solutions like Cluster API and dynamically start and stop reconciliation against clusters discovered through the provider.
 - **no fork, no go mod replace**: clean extension to [upstream controller-runtime](https://github.com/kubernetes-sigs/controller-runtime).
 - **universal**: kind, [cluster-api](https://github.com/kubernetes-sigs/cluster-api), [Gardener](https://gardener.cloud/) (tbd), kcp (WIP), BYO. Cluster providers make the controller-runtime multi-cluster aware.
-- **seamless**: add multi-cluster support without compromising on single-cluster. Run in either mode without code changes to the reconcilers. 
+- **seamless**: add multi-cluster support without compromising on single-cluster. Run in either mode without code changes to the reconcilers.
 
-## Uniform Reconcilers
+## Patterns Possible with multicluster-runtime
+
+### Uniform Reconcilers
 
 Run the same reconciler against many clusters:
 - The reconciler reads from cluster A and writes to cluster A.
@@ -27,7 +32,7 @@ This is the most simple case. Many existing reconcilers can easily adapted to wo
 
 ![multi-cluster topologies uniform](https://github.com/user-attachments/assets/b91a3aac-6a1c-481e-8961-2f25605aeffe)
 
-## Multi-Cluster-aware Reconcilers
+### Multi-Cluster-Aware Reconcilers
 
 Run reconcilers that listen to some cluster(s) and operate other clusters.
 ![multi-cluster topologies multi](https://github.com/user-attachments/assets/d7e37c39-66e3-4912-89ac-5441f0ad5669)
@@ -41,7 +46,7 @@ Run reconcilers that listen to some cluster(s) and operate other clusters.
 5. multicluster-runtime could be a testbed for native controller-runtime functionality, eventually becoming superfluous.
 6. multicluster-runtime is provider agnostic, but may contain providers with its own go.mod files and dedicated OWNERS files.
 
-## How it looks?
+## Code Sample
 
 ```golang
 package main
@@ -107,9 +112,9 @@ func main() {
 }
 ```
 
-## FAQ
+## FAQs
 
-### How is it different from https://github.com/admiraltyio/multicluster-controller ?
+### How is this different from https://github.com/admiraltyio/multicluster-controller ?
 
 In contrast to https://github.com/admiraltyio/multicluster-controller, multicluster-runtime keeps building on controller-runtime for most of its constructs. It is not replacing the manager, the controller or the cluster. To a large degree, this became possible through the extensive use of generics in controller-runtime. Most multicluster-runtime constructs are just type instantiations with a little glue.
 
