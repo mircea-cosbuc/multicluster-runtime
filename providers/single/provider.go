@@ -18,7 +18,6 @@ package namespace
 
 import (
 	"context"
-	"fmt"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
@@ -55,7 +54,7 @@ func (p *Provider) Get(_ context.Context, clusterName string) (cluster.Cluster, 
 	if clusterName == p.name {
 		return p.cl, nil
 	}
-	return nil, fmt.Errorf("cluster %s not found", clusterName)
+	return nil, multicluster.ErrClusterNotFound
 }
 
 // IndexField calls IndexField on the single cluster.

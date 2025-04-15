@@ -134,7 +134,8 @@ func (p *Provider) Get(_ context.Context, clusterName string) (cluster.Cluster, 
 	if cl, ok := p.clusters[clusterName]; ok {
 		return cl, nil
 	}
-	return nil, fmt.Errorf("cluster %s not found", clusterName)
+
+	return nil, multicluster.ErrClusterNotFound
 }
 
 // IndexField indexes a field on all clusters.

@@ -40,6 +40,7 @@ import (
 
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 	capi "sigs.k8s.io/multicluster-runtime/providers/cluster-api"
 )
@@ -103,6 +104,10 @@ func main() {
 
 				cl, err := mcMgr.GetCluster(ctx, req.ClusterName)
 				if err != nil {
+					if errors.Is(err, multicluster.ErrClusterNotFound) {
+						log.Info("Cluster not found, might have been disengaged")
+						return reconcile.Result{}, nil
+					}
 					return reconcile.Result{}, err
 				}
 
