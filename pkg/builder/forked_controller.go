@@ -73,6 +73,8 @@ type TypedBuilder[request mcreconcile.ClusterAware[request]] struct {
 	ctrlOptions      controller.TypedOptions[request]
 	name             string
 	newController    func(name string, mgr mcmanager.Manager, options controller.TypedOptions[request]) (mccontroller.TypedController[request], error)
+
+	enableClusterNotFoundWrapper *bool
 }
 
 // ControllerManagedBy returns a new controller builder that will be started by the provided Manager.
@@ -257,6 +259,15 @@ func (blder *TypedBuilder[request]) WithOptions(options controller.TypedOptions[
 // WithLogConstructor overrides the controller options's LogConstructor.
 func (blder *TypedBuilder[request]) WithLogConstructor(logConstructor func(*request) logr.Logger) *TypedBuilder[request] {
 	blder.ctrlOptions.LogConstructor = logConstructor
+	return blder
+}
+
+// WithClusterNotFoundWrapper enables or disables a reconciler that is wrapped around the original reconciler
+// added to this builder. [reconcile.ClusterNotFoundWrapper] will stop reconcile results with [multicluster.ErrClusterNotFound]
+// as error from requeuing by marking them as successfully reconciled. This wrapper is enabled by default
+// and can be disabled with this builder method by setting it to false.
+func (blder *TypedBuilder[request]) WithClusterNotFoundWrapper(enabled bool) *TypedBuilder[request] {
+	blder.enableClusterNotFoundWrapper = ptr.To(enabled)
 	return blder
 }
 
@@ -448,6 +459,11 @@ func (blder *TypedBuilder[request]) doController(r reconcile.TypedReconciler[req
 	}
 	if ctrlOptions.Reconciler == nil {
 		ctrlOptions.Reconciler = r
+	}
+
+	// the ClusterNotFound wrapper is enabled by default, but can be disabled with WithClusterNotFoundWrapper(false).
+	if ptr.Deref(blder.enableClusterNotFoundWrapper, true) {
+		ctrlOptions.Reconciler = mcreconcile.NewClusterNotFoundWrapper(ctrlOptions.Reconciler)
 	}
 
 	// Retrieve the GVK from the object we're reconciling
