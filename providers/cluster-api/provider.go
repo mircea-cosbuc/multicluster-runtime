@@ -123,7 +123,7 @@ func (p *Provider) Get(_ context.Context, clusterName string) (cluster.Cluster, 
 		return cl, nil
 	}
 
-	return nil, fmt.Errorf("cluster %s not found", clusterName)
+	return nil, multicluster.ErrClusterNotFound
 }
 
 // Run starts the provider and blocks.

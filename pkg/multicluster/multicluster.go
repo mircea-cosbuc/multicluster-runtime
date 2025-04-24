@@ -54,7 +54,7 @@ type Provider interface {
 	// Get returns a cluster for the given identifying cluster name. Get
 	// returns an existing cluster if it has been created before.
 	// If no cluster is known to the provider under the given cluster name,
-	// an error should be returned.
+	// ErrClusterNotFound should be returned.
 	Get(ctx context.Context, clusterName string) (cluster.Cluster, error)
 
 	// IndexField indexes the given object by the given field on all engaged
