@@ -19,8 +19,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 
+	"github.com/go-logr/logr"
 	flag "github.com/spf13/pflag"
 	"golang.org/x/sync/errgroup"
 
@@ -30,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -59,21 +62,27 @@ func main() {
 	kubeconfig := flag.String("kubeconfig", "", "path to the kubeconfig file. If not given a test env is started.")
 	flag.Parse()
 
+	if err := run(ctx, entryLog, ptr.Deref(kubeconfig, "")); err != nil {
+		entryLog.Error(err, "failed to run controller")
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, log logr.Logger, kubeconfig string) error {
 	var cfg *rest.Config
-	if *kubeconfig == "" {
+	if kubeconfig == "" {
 		testEnv := &envtest.Environment{}
 		var err error
 		cfg, err = testEnv.Start()
 		if err != nil {
-			entryLog.Error(err, "failed to start local environment")
-			os.Exit(1)
+			return fmt.Errorf("failed to start local environment: %w", err)
 		}
 		defer func() {
 			if testEnv == nil {
 				return
 			}
 			if err := testEnv.Stop(); err != nil {
-				entryLog.Error(err, "failed to stop local environment")
+				log.Error(err, "failed to stop local environment")
 				os.Exit(1)
 			}
 		}()
@@ -81,19 +90,17 @@ func main() {
 		var err error
 		cfg, err = ctrl.GetConfig()
 		if err != nil {
-			entryLog.Error(err, "failed to get kubeconfig")
-			os.Exit(1)
+			return fmt.Errorf("failed to get kubeconfig: %w", err)
 		}
 	}
 
 	// Test fixtures
 	cli, err := client.New(cfg, client.Options{})
 	if err != nil {
-		entryLog.Error(err, "failed to create client")
-		os.Exit(1)
+		return fmt.Errorf("failed to create client: %w", err)
 	}
 
-	entryLog.Info("Creating Namespace and ConfigMap objects")
+	log.Info("Creating Namespace and ConfigMap objects")
 	runtime.Must(client.IgnoreAlreadyExists(cli.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "zoo"}})))
 	runtime.Must(client.IgnoreAlreadyExists(cli.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "zoo", Name: "elephant"}})))
 	runtime.Must(client.IgnoreAlreadyExists(cli.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "zoo", Name: "lion"}})))
@@ -104,20 +111,18 @@ func main() {
 
 	cl, err := cluster.New(cfg)
 	if err != nil {
-		entryLog.Error(err, "failed to create cluster")
-		os.Exit(1)
+		return fmt.Errorf("failed to create cluster: %w", err)
 	}
 	provider := namespace.New(cl)
 
 	// Setup a cluster-aware Manager, with the provider to lookup clusters.
-	entryLog.Info("Setting up cluster-aware manager")
+	log.Info("Setting up cluster-aware manager")
 	mgr, err := mcmanager.New(cfg, provider, manager.Options{})
 	if err != nil {
-		entryLog.Error(err, "unable to set up overall controller manager")
-		os.Exit(1)
+		return fmt.Errorf("unable to set up overall controller manager: %w", err)
 	}
 
-	mcbuilder.ControllerManagedBy(mgr).
+	if err := mcbuilder.ControllerManagedBy(mgr).
 		Named("multicluster-configmaps").
 		For(&corev1.ConfigMap{}).
 		Complete(mcreconcile.Func(
@@ -142,7 +147,9 @@ func main() {
 
 				return ctrl.Result{}, nil
 			},
-		))
+		)); err != nil {
+		return fmt.Errorf("unable to build controller: %w", err)
+	}
 
 	// Starting everything.
 	g, ctx := errgroup.WithContext(ctx)
@@ -156,9 +163,10 @@ func main() {
 		return ignoreCanceled(mgr.Start(ctx))
 	})
 	if err := g.Wait(); err != nil {
-		entryLog.Error(err, "unable to start")
-		os.Exit(1)
+		return fmt.Errorf("unable to start: %w", err)
 	}
+
+	return nil
 }
 
 func ignoreCanceled(err error) error {
