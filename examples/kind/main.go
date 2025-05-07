@@ -72,7 +72,7 @@ func main() {
 					return reconcile.Result{}, err
 				}
 
-				log.Info("ConfigMap %s/%s in cluster %q", cm.Namespace, cm.Name, req.ClusterName)
+				log.Info("ConfigMap found", "namespace", cm.Namespace, "name", cm.Name, "cluster", req.ClusterName)
 
 				return ctrl.Result{}, nil
 			},
