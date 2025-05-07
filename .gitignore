@@ -26,3 +26,7 @@ go.work.sum
 
 # Go binaries of compiled tools
 hack/tools/bin
+
+# IDE files
+.vscode
+.idea
