@@ -16,7 +16,7 @@ multicluster-runtime is a Go library to write Kubernetes controllers that reconc
 
 - **dynamic fleet orchestration**: So-called providers interact with multi-cluster solutions like Cluster API and dynamically start and stop reconciliation against clusters discovered through the provider.
 - **no fork, no go mod replace**: clean extension to [upstream controller-runtime](https://github.com/kubernetes-sigs/controller-runtime).
-- **universal**: Any kind of multi-cluster solution could theoretically be supported (kind, [cluster-api](https://github.com/kubernetes-sigs/cluster-api), [Gardener](https://gardener.cloud/) (tbd), [kcp](https://kcp.io), BYO). Cluster providers make the controller-runtime multi-cluster aware.
+- **universal**: Any kind of multi-cluster solution could theoretically be supported (kind, [cluster-api](https://github.com/kubernetes-sigs/cluster-api), [Gardener](https://gardener.cloud/), [kcp](https://kcp.io), BYO). Cluster providers make the controller-runtime multi-cluster aware.
 - **seamless**: add multi-cluster support without compromising on single-cluster. Run in either mode without code changes to the reconcilers.
 
 ## Patterns Possible with multicluster-runtime
@@ -56,6 +56,7 @@ Run reconcilers that listen to some cluster(s) and operate other clusters.
 The following cluster provider implementations exist outside of this repository:
 
 - [kcp-dev/multicluster-provider](https://github.com/kcp-dev/multicluster-provider): Collection of multicluster-runtime providers to interact with [kcp](https://kcp.io)'s logical clusters.
+- [gardener/multicluster-provider](https://github.com/gardener/multicluster-provider): A multicluster-runtime provider to interact with [Gardener](https://gardener.cloud)'s shoot clusters.
 
 ## Code Sample
 
