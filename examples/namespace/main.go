@@ -136,7 +136,7 @@ func run(ctx context.Context, log logr.Logger, kubeconfig string) error {
 				}
 
 				cm := &corev1.ConfigMap{}
-				if err := cl.GetClient().Get(ctx, req.Request.NamespacedName, cm); err != nil {
+				if err := cl.GetClient().Get(ctx, req.NamespacedName, cm); err != nil {
 					if apierrors.IsNotFound(err) {
 						return reconcile.Result{}, nil
 					}

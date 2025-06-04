@@ -19,6 +19,7 @@ package namespace
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 
 	"golang.org/x/sync/errgroup"
@@ -83,7 +84,7 @@ var _ = Describe("Provider Namespace", Ordered, func() {
 
 						cl, err := mgr.GetCluster(ctx, req.ClusterName)
 						if err != nil {
-							return reconcile.Result{}, err
+							return reconcile.Result{}, fmt.Errorf("failed to get cluster: %w", err)
 						}
 
 						// Feed the animal.
@@ -92,7 +93,7 @@ var _ = Describe("Provider Namespace", Ordered, func() {
 							if apierrors.IsNotFound(err) {
 								return reconcile.Result{}, nil
 							}
-							return reconcile.Result{}, err
+							return reconcile.Result{}, fmt.Errorf("failed to get configmap: %w", err)
 						}
 						if cm.GetLabels()["type"] != "animal" {
 							return reconcile.Result{}, nil
@@ -100,7 +101,7 @@ var _ = Describe("Provider Namespace", Ordered, func() {
 
 						cm.Data = map[string]string{"stomach": "food"}
 						if err := cl.GetClient().Update(ctx, cm); err != nil {
-							return reconcile.Result{}, err
+							return reconcile.Result{}, fmt.Errorf("failed to update configmap: %w", err)
 						}
 
 						return ctrl.Result{}, nil

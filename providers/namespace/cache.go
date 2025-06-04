@@ -146,7 +146,12 @@ func (i *ScopedInformer) AddEventHandler(handler toolscache.ResourceEventHandler
 
 // AddEventHandlerWithResyncPeriod adds an event handler to the informer with a resync period.
 func (i *ScopedInformer) AddEventHandlerWithResyncPeriod(handler toolscache.ResourceEventHandler, resyncPeriod time.Duration) (toolscache.ResourceEventHandlerRegistration, error) {
-	return i.Informer.AddEventHandlerWithResyncPeriod(toolscache.ResourceEventHandlerDetailedFuncs{
+	return i.AddEventHandlerWithOptions(handler, toolscache.HandlerOptions{ResyncPeriod: &resyncPeriod})
+}
+
+// AddEventHandlerWithOptions adds an event handler to the informer, passing along options to configure its behaviour.
+func (i *ScopedInformer) AddEventHandlerWithOptions(handler toolscache.ResourceEventHandler, options toolscache.HandlerOptions) (toolscache.ResourceEventHandlerRegistration, error) {
+	return i.Informer.AddEventHandlerWithOptions(toolscache.ResourceEventHandlerDetailedFuncs{
 		AddFunc: func(obj interface{}, isInInitialList bool) {
 			cobj := obj.(client.Object)
 			if cobj.GetNamespace() == i.clusterName {
@@ -176,7 +181,7 @@ func (i *ScopedInformer) AddEventHandlerWithResyncPeriod(handler toolscache.Reso
 				handler.OnDelete(cobj)
 			}
 		},
-	}, resyncPeriod)
+	}, options)
 }
 
 // AddIndexers adds indexers to the informer.
