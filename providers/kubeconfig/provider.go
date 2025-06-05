@@ -21,8 +21,6 @@ package kubeconfig
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/go-logr/logr"
@@ -58,9 +56,6 @@ func New(opts Options) *Provider {
 	if opts.KubeconfigSecretKey == "" {
 		opts.KubeconfigSecretKey = DefaultKubeconfigSecretKey
 	}
-	if opts.LocalKubeconfigPath == "" {
-		opts.LocalKubeconfigPath = filepath.Join(os.Getenv("HOME"), ".kube", "config")
-	}
 
 	return &Provider{
 		opts:      opts,
@@ -79,8 +74,6 @@ type Options struct {
 	KubeconfigSecretLabel string
 	// KubeconfigSecretKey is the key in the secret data that contains the kubeconfig.
 	KubeconfigSecretKey string
-	// LocalKubeconfigPath is the path to kubeconfig file for test secrets.
-	LocalKubeconfigPath string
 }
 
 type index struct {

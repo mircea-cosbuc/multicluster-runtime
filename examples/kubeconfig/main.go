@@ -17,23 +17,25 @@ limitations under the License.
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"os"
 
-	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
-	// to ensure that exec-entrypoint and run can make use of them.
-	"k8s.io/client-go/kubernetes/scheme"
-	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"golang.org/x/sync/errgroup"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	// Import your controllers here <--------------------------------
-	"sigs.k8s.io/multicluster-runtime/examples/kubeconfig/controllers"
-
+	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 	kubeconfigprovider "sigs.k8s.io/multicluster-runtime/providers/kubeconfig"
 )
 
@@ -69,46 +71,62 @@ func main() {
 	entryLog.Info("Creating provider")
 	provider := kubeconfigprovider.New(providerOpts)
 
-	// Create the multicluster manager with the provider
+	// Setup a cluster-aware Manager, with the provider to lookup clusters.
 	entryLog.Info("Creating manager")
-
-	// Modify manager options to avoid waiting for cache sync
-	managerOpts := manager.Options{
-		// Don't block main thread on leader election
-		LeaderElection: false,
-		// Add the scheme
-		Scheme: scheme.Scheme,
-	}
-
-	mgr, err := mcmanager.New(ctrl.GetConfigOrDie(), provider, managerOpts)
+	mgr, err := mcmanager.New(ctrl.GetConfigOrDie(), provider, manager.Options{})
 	if err != nil {
 		entryLog.Error(err, "Unable to create manager")
 		os.Exit(1)
 	}
 
-	// Add our controllers
-	entryLog.Info("Adding controllers")
+	err = mcbuilder.ControllerManagedBy(mgr).
+		Named("multicluster-configmaps").
+		For(&corev1.ConfigMap{}).
+		Complete(mcreconcile.Func(
+			func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
+				log := ctrllog.FromContext(ctx).WithValues("cluster", req.ClusterName)
+				log.Info("Reconciling ConfigMap")
 
-	// Run your controllers here <--------------------------------
-	podWatcher := controllers.NewPodWatcher(mgr)
-	if err := mgr.Add(podWatcher); err != nil {
-		entryLog.Error(err, "Unable to add pod watcher")
+				cl, err := mgr.GetCluster(ctx, req.ClusterName)
+				if err != nil {
+					return reconcile.Result{}, err
+				}
+
+				cm := &corev1.ConfigMap{}
+				if err := cl.GetClient().Get(ctx, req.Request.NamespacedName, cm); err != nil {
+					if apierrors.IsNotFound(err) {
+						return reconcile.Result{}, nil
+					}
+					return reconcile.Result{}, err
+				}
+
+				log.Info("ConfigMap found", "namespace", cm.Namespace, "name", cm.Name, "cluster", req.ClusterName)
+
+				return ctrl.Result{}, nil
+			},
+		))
+	if err != nil {
+		entryLog.Error(err, "unable to create controller")
 		os.Exit(1)
 	}
 
-	// Start provider in a goroutine
-	entryLog.Info("Starting provider")
-	go func() {
-		err := provider.Run(ctx, mgr)
-		if err != nil && ctx.Err() == nil {
-			entryLog.Error(err, "Provider exited with error")
-		}
-	}()
-
-	// Start the manager
-	entryLog.Info("Starting manager")
-	if err := mgr.Start(ctx); err != nil {
-		entryLog.Error(err, "Error running manager")
+	// Starting everything.
+	g, ctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return ignoreCanceled(provider.Run(ctx, mgr))
+	})
+	g.Go(func() error {
+		return ignoreCanceled(mgr.Start(ctx))
+	})
+	if err := g.Wait(); err != nil {
+		entryLog.Error(err, "unable to start")
 		os.Exit(1)
 	}
+}
+
+func ignoreCanceled(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
