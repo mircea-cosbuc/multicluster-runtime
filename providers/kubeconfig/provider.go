@@ -20,6 +20,8 @@ package kubeconfig
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sync"
 
@@ -59,11 +61,10 @@ func New(opts Options) *Provider {
 	}
 
 	return &Provider{
-		opts:      opts,
-		log:       log.Log.WithName("kubeconfig-provider"),
-		client:    nil, // Will be set in Run
-		clusters:  map[string]cluster.Cluster{},
-		cancelFns: map[string]context.CancelFunc{},
+		opts:     opts,
+		log:      log.Log.WithName("kubeconfig-provider"),
+		client:   nil, // Will be set in Run
+		clusters: map[string]activeCluster{},
 	}
 }
 
@@ -90,10 +91,16 @@ type Provider struct {
 	log            logr.Logger
 	client         client.Client
 	lock           sync.RWMutex // protects everything below.
-	clusters       map[string]cluster.Cluster
-	cancelFns      map[string]context.CancelFunc
+	clusters       map[string]activeCluster
 	indexers       []index
 	secretInformer cache.Informer
+}
+
+type activeCluster struct {
+	Cluster cluster.Cluster
+	Context context.Context
+	Cancel  context.CancelFunc
+	Hash    string // hash of the kubeconfig
 }
 
 // Get returns the cluster with the given name, if it is known.
@@ -102,7 +109,7 @@ func (p *Provider) Get(ctx context.Context, clusterName string) (cluster.Cluster
 	defer p.lock.RUnlock()
 
 	if cl, ok := p.clusters[clusterName]; ok {
-		return cl, nil
+		return cl.Cluster, nil
 	}
 
 	return nil, fmt.Errorf("cluster %s not found", clusterName)
@@ -190,22 +197,32 @@ func (p *Provider) handleSecret(ctx context.Context, secret *corev1.Secret, mgr 
 		return nil
 	}
 
-	// Parse the kubeconfig
-	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
-	if err != nil {
-		return fmt.Errorf("failed to parse kubeconfig: %w", err)
-	}
+	// Hash the kubeconfig
+	hash := sha256.New()
+	hash.Write(kubeconfigData)
+	hashStr := hex.EncodeToString(hash.Sum(nil))
 
 	// Check if cluster exists and remove it if it does
 	p.lock.RLock()
-	_, clusterExists := p.clusters[clusterName]
-	p.lock.RUnlock()
-
+	ac, clusterExists := p.clusters[clusterName]
 	if clusterExists {
+		if ac.Hash == hashStr {
+			log.Info("Cluster already exists and has the same kubeconfig, skipping")
+			p.lock.RUnlock()
+			return nil
+		}
+
 		log.Info("Cluster already exists, updating it")
 		if err := p.removeCluster(clusterName); err != nil {
 			return fmt.Errorf("failed to remove existing cluster: %w", err)
 		}
+	}
+	p.lock.RUnlock()
+
+	// Parse the kubeconfig
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
+	if err != nil {
+		return fmt.Errorf("failed to parse kubeconfig: %w", err)
 	}
 
 	// Create a new cluster
@@ -245,8 +262,12 @@ func (p *Provider) handleSecret(ctx context.Context, secret *corev1.Secret, mgr 
 
 	// Store the cluster
 	p.lock.Lock()
-	p.clusters[clusterName] = cl
-	p.cancelFns[clusterName] = cancel
+	p.clusters[clusterName] = activeCluster{
+		Cluster: cl,
+		Context: clusterCtx,
+		Cancel:  cancel,
+		Hash:    hashStr,
+	}
 	p.lock.Unlock()
 
 	log.Info("Successfully added cluster")
@@ -257,7 +278,6 @@ func (p *Provider) handleSecret(ctx context.Context, secret *corev1.Secret, mgr 
 			log.Error(err, "Failed to engage manager, removing cluster")
 			p.lock.Lock()
 			delete(p.clusters, clusterName)
-			delete(p.cancelFns, clusterName)
 			p.lock.Unlock()
 			cancel() // Cancel the cluster context
 			return fmt.Errorf("failed to engage manager: %w", err)
@@ -292,28 +312,20 @@ func (p *Provider) removeCluster(clusterName string) error {
 
 	// Find the cluster and cancel function
 	p.lock.RLock()
-	_, exists := p.clusters[clusterName]
+	ac, exists := p.clusters[clusterName]
 	if !exists {
 		p.lock.RUnlock()
 		return fmt.Errorf("cluster %s not found", clusterName)
 	}
-
-	// Get the cancel function
-	cancelFn, exists := p.cancelFns[clusterName]
-	if !exists {
-		p.lock.RUnlock()
-		return fmt.Errorf("cancel function for cluster %s not found", clusterName)
-	}
 	p.lock.RUnlock()
 
 	// Cancel the context to trigger cleanup for this cluster
-	cancelFn()
+	ac.Cancel()
 	log.Info("Cancelled cluster context")
 
 	// Clean up our maps
 	p.lock.Lock()
 	delete(p.clusters, clusterName)
-	delete(p.cancelFns, clusterName)
 	p.lock.Unlock()
 
 	log.Info("Successfully removed cluster")
@@ -333,8 +345,8 @@ func (p *Provider) IndexField(ctx context.Context, obj client.Object, field stri
 	})
 
 	// Apply to existing clusters
-	for name, cl := range p.clusters {
-		if err := cl.GetFieldIndexer().IndexField(ctx, obj, field, extractValue); err != nil {
+	for name, ac := range p.clusters {
+		if err := ac.Cluster.GetFieldIndexer().IndexField(ctx, obj, field, extractValue); err != nil {
 			return fmt.Errorf("failed to index field %q on cluster %q: %w", field, name, err)
 		}
 	}
@@ -350,7 +362,7 @@ func (p *Provider) ListClusters() map[string]cluster.Cluster {
 	// Return a copy of the map to avoid race conditions
 	result := make(map[string]cluster.Cluster, len(p.clusters))
 	for k, v := range p.clusters {
-		result[k] = v
+		result[k] = v.Cluster
 	}
 	return result
 }
