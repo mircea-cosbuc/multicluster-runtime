@@ -205,10 +205,10 @@ func (p *Provider) handleSecret(ctx context.Context, secret *corev1.Secret, mgr 
 	// Check if cluster exists and remove it if it does
 	p.lock.RLock()
 	ac, clusterExists := p.clusters[clusterName]
+	p.lock.RUnlock()
 	if clusterExists {
 		if ac.Hash == hashStr {
 			log.Info("Cluster already exists and has the same kubeconfig, skipping")
-			p.lock.RUnlock()
 			return nil
 		}
 
@@ -217,7 +217,6 @@ func (p *Provider) handleSecret(ctx context.Context, secret *corev1.Secret, mgr 
 			return fmt.Errorf("failed to remove existing cluster: %w", err)
 		}
 	}
-	p.lock.RUnlock()
 
 	// Parse the kubeconfig
 	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
