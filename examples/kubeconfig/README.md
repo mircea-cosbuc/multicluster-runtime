@@ -13,8 +13,6 @@ The kubeconfig provider allows you to:
 
 ```
 examples/kubeconfig/
-├── controllers/                    # Example controller that simply lists pods
-│   ├── pod_lister.go
 ├── scripts/                 # Utility scripts
 │   └── create-kubeconfig-secret.sh
 └── main.go                 # Example operator implementation
@@ -62,7 +60,7 @@ metadata:
 rules:
 # Add permissions for your operator <--------------------------------
 - apiGroups: [""]
-  resources: ["pods"]
+  resources: ["configmaps"]
   verbs: ["list", "get", "watch"]  # watch is needed for controllers that observe resources
 ```
 
@@ -78,17 +76,16 @@ Add your controllers to `main.go`:
 
 ```go
 func main() {
-    // Import your controllers here <--------------------------------
-	"sigs.k8s.io/multicluster-runtime/examples/kubeconfig/controllers"
+  err = mcbuilder.ControllerManagedBy(mgr).
+		Named("multicluster-configmaps").
+		For(&corev1.ConfigMap{}). // object to watch
+		Complete(mcreconcile.Func(
+			func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
+				// reconcile logic
 
-    //...
-
-    // Run your controllers here <--------------------------------
-	podWatcher := controllers.NewPodWatcher(mgr)
-	if err := mgr.Add(podWatcher); err != nil {
-		entryLog.Error(err, "Unable to add pod watcher")
-		os.Exit(1)
-	}
+				return ctrl.Result{}, nil
+			},
+		))
 }
 ```
 

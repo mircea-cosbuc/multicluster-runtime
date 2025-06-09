@@ -79,6 +79,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create a controller that watches ConfigMaps and logs when they are found.
 	err = mcbuilder.ControllerManagedBy(mgr).
 		Named("multicluster-configmaps").
 		For(&corev1.ConfigMap{}).
