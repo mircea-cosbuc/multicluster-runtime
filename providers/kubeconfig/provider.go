@@ -231,15 +231,18 @@ func (p *Provider) handleSecret(ctx context.Context, secret *corev1.Secret, mgr 
 		return fmt.Errorf("failed to create cluster: %w", err)
 	}
 
-	// Apply any field indexers
+	// Copy indexers to avoid holding lock.
 	p.lock.RLock()
-	for _, idx := range p.indexers {
+	indexers := make([]index, len(p.indexers))
+	copy(indexers, p.indexers)
+	p.lock.RUnlock()
+
+	// Apply any field indexers
+	for _, idx := range indexers {
 		if err := cl.GetFieldIndexer().IndexField(ctx, idx.object, idx.field, idx.extractValue); err != nil {
-			p.lock.RUnlock()
 			return fmt.Errorf("failed to index field %q: %w", idx.field, err)
 		}
 	}
-	p.lock.RUnlock()
 
 	// Create a context that will be canceled when this cluster is removed
 	clusterCtx, cancel := context.WithCancel(ctx)
@@ -309,23 +312,19 @@ func (p *Provider) removeCluster(clusterName string) error {
 	log := p.log.WithValues("cluster", clusterName)
 	log.Info("Removing cluster")
 
-	// Find the cluster and cancel function
-	p.lock.RLock()
+	p.lock.Lock()
 	ac, exists := p.clusters[clusterName]
 	if !exists {
-		p.lock.RUnlock()
-		return fmt.Errorf("cluster %s not found", clusterName)
+		p.lock.Unlock()
+		return fmt.Errorf("cluster not found")
 	}
-	p.lock.RUnlock()
-
-	// Cancel the context to trigger cleanup for this cluster
-	ac.Cancel()
-	log.Info("Cancelled cluster context")
-
-	// Clean up our maps
-	p.lock.Lock()
 	delete(p.clusters, clusterName)
 	p.lock.Unlock()
+
+	// Cancel the context to trigger cleanup for this cluster.
+	// This is done outside the lock to avoid holding the lock for a long time.
+	ac.Cancel()
+	log.Info("Cancelled cluster context")
 
 	log.Info("Successfully removed cluster")
 	return nil
@@ -334,7 +333,6 @@ func (p *Provider) removeCluster(clusterName string) error {
 // IndexField indexes a field on all clusters, existing and future.
 func (p *Provider) IndexField(ctx context.Context, obj client.Object, field string, extractValue client.IndexerFunc) error {
 	p.lock.Lock()
-	defer p.lock.Unlock()
 
 	// Save for future clusters
 	p.indexers = append(p.indexers, index{
@@ -343,9 +341,16 @@ func (p *Provider) IndexField(ctx context.Context, obj client.Object, field stri
 		extractValue: extractValue,
 	})
 
-	// Apply to existing clusters
+	// Create a copy of the clusters to avoid holding the lock.
+	clustersSnapshot := make(map[string]cluster.Cluster, len(p.clusters))
 	for name, ac := range p.clusters {
-		if err := ac.Cluster.GetFieldIndexer().IndexField(ctx, obj, field, extractValue); err != nil {
+		clustersSnapshot[name] = ac.Cluster
+	}
+	p.lock.Unlock()
+
+	// Apply to existing clusters
+	for name, cl := range clustersSnapshot {
+		if err := cl.GetFieldIndexer().IndexField(ctx, obj, field, extractValue); err != nil {
 			return fmt.Errorf("failed to index field %q on cluster %q: %w", field, name, err)
 		}
 	}

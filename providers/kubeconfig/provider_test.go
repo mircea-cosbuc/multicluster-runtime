@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -35,6 +37,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -317,3 +320,75 @@ func createKubeconfigSecret(ctx context.Context, name string, cfg *rest.Config, 
 	}
 	return cl.Create(ctx, secret)
 }
+
+// mockCluster is a mock implementation of cluster.Cluster for testing.
+type mockCluster struct {
+	cluster.Cluster
+}
+
+func (c *mockCluster) GetFieldIndexer() client.FieldIndexer {
+	return &mockFieldIndexer{}
+}
+
+type mockFieldIndexer struct{}
+
+func (f *mockFieldIndexer) IndexField(ctx context.Context, obj client.Object, field string, extractValue client.IndexerFunc) error {
+	// Simulate work to increase chance of race
+	time.Sleep(time.Millisecond)
+	return nil
+}
+
+var _ = Describe("Provider race condition", func() {
+	It("should handle concurrent operations without issues", func() {
+		p := New(Options{})
+
+		// Pre-populate with some clusters to make the test meaningful
+		numClusters := 20
+		for i := 0; i < numClusters; i++ {
+			clusterName := fmt.Sprintf("cluster-%d", i)
+			p.clusters[clusterName] = activeCluster{
+				Cluster: &mockCluster{},
+				Cancel:  func() {},
+			}
+		}
+
+		var wg sync.WaitGroup
+		numGoroutines := 40
+		wg.Add(numGoroutines)
+
+		for i := 0; i < numGoroutines; i++ {
+			go func(i int) {
+				defer GinkgoRecover()
+				defer wg.Done()
+
+				// Mix of operations to stress the provider
+				switch i % 4 {
+				case 0:
+					// Concurrently index a field. This will read the cluster list.
+					err := p.IndexField(context.Background(), &corev1.Pod{}, "spec.nodeName", func(rawObj client.Object) []string {
+						return nil
+					})
+					Expect(err).NotTo(HaveOccurred())
+				case 1:
+					// Concurrently get a cluster.
+					_, err := p.Get(context.Background(), "cluster-1")
+					Expect(err).NotTo(HaveOccurred())
+				case 2:
+					// Concurrently list clusters.
+					p.ListClusters()
+				case 3:
+					// Concurrently delete a cluster. This will modify the cluster map.
+					clusterToRemove := fmt.Sprintf("cluster-%d", i/4)
+					secret := &corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: clusterToRemove,
+						},
+					}
+					p.handleSecretDelete(secret)
+				}
+			}(i)
+		}
+
+		wg.Wait()
+	})
+})
