@@ -22,8 +22,6 @@ import (
 	"flag"
 	"os"
 
-	"golang.org/x/sync/errgroup"
-
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -31,9 +29,9 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
@@ -78,25 +76,18 @@ func main() {
 		},
 	}
 
-	// Log only the serializable fields from manager options
-	safeOpts := map[string]interface{}{
-		"leaderElection": managerOpts.LeaderElection,
-		"metrics": map[string]interface{}{
-			"bindAddress": managerOpts.Metrics.BindAddress,
-		},
-		"healthProbeBindAddress":  managerOpts.HealthProbeBindAddress,
-		"pprofBindAddress":        managerOpts.PprofBindAddress,
-		"gracefulShutdownTimeout": managerOpts.GracefulShutdownTimeout,
-		"controller": map[string]interface{}{
-			"groupKindConcurrency": managerOpts.Controller.GroupKindConcurrency,
-			"cacheSyncTimeout":     managerOpts.Controller.CacheSyncTimeout,
-		},
-	}
-
-	entryLog.Info("Creating manager", "options", safeOpts)
+	// Create multicluster manager
+	entryLog.Info("Creating manager")
 	mgr, err := mcmanager.New(ctrl.GetConfigOrDie(), provider, managerOpts)
 	if err != nil {
 		entryLog.Error(err, "Unable to create manager")
+		os.Exit(1)
+	}
+
+	// Setup provider controller with the manager.
+	err = provider.SetupWithManager(ctx, mgr)
+	if err != nil {
+		entryLog.Error(err, "Unable to setup provider with manager")
 		os.Exit(1)
 	}
 
@@ -132,23 +123,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Starting everything.
-	g, ctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		return ignoreCanceled(provider.Run(ctx, mgr))
-	})
-	g.Go(func() error {
-		return ignoreCanceled(mgr.Start(ctx))
-	})
-	if err := g.Wait(); err != nil {
+	// Start the manager.
+	err = mgr.Start(ctx)
+	if err != nil && !errors.Is(err, context.Canceled) {
 		entryLog.Error(err, "unable to start")
 		os.Exit(1)
 	}
-}
-
-func ignoreCanceled(err error) error {
-	if errors.Is(err, context.Canceled) {
-		return nil
-	}
-	return err
 }

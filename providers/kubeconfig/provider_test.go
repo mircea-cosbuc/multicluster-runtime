@@ -24,8 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
@@ -55,7 +54,7 @@ const kubeconfigSecretKey = "config"
 
 var _ = Describe("Provider Namespace", Ordered, func() {
 	ctx, cancel := context.WithCancel(context.Background())
-	g, ctx := errgroup.WithContext(ctx)
+	wg := sync.WaitGroup{}
 
 	var provider *Provider
 	// var cl cluster.Cluster
@@ -106,7 +105,16 @@ var _ = Describe("Provider Namespace", Ordered, func() {
 
 		By("Setting up the cluster-aware manager, with the provider to lookup clusters", func() {
 			var err error
-			mgr, err = mcmanager.New(localCfg, provider, mcmanager.Options{})
+			mgr, err = mcmanager.New(localCfg, provider, mcmanager.Options{
+				Metrics: metricsserver.Options{
+					BindAddress: "0",
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		By("Setting up the provider with the manager", func() {
+			err := provider.SetupWithManager(ctx, mgr)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
@@ -155,13 +163,12 @@ var _ = Describe("Provider Namespace", Ordered, func() {
 		})
 
 		By("Starting the provider, cluster, manager, and controller", func() {
-			g.Go(func() error {
-				return ignoreCanceled(provider.Run(ctx, mgr))
-			})
-
-			g.Go(func() error {
-				return ignoreCanceled(mgr.Start(ctx))
-			})
+			wg.Add(1)
+			go func() {
+				err := ignoreCanceled(mgr.Start(ctx))
+				Expect(err).NotTo(HaveOccurred())
+				wg.Done()
+			}()
 		})
 
 	})
@@ -263,10 +270,7 @@ var _ = Describe("Provider Namespace", Ordered, func() {
 	AfterAll(func() {
 		By("Stopping the provider, cluster, manager, and controller", func() {
 			cancel()
-		})
-		By("Waiting for the error group to finish", func() {
-			err := g.Wait()
-			Expect(err).NotTo(HaveOccurred())
+			wg.Wait()
 		})
 	})
 })
@@ -372,19 +376,14 @@ var _ = Describe("Provider race condition", func() {
 				case 1:
 					// Concurrently get a cluster.
 					_, err := p.Get(context.Background(), "cluster-1")
-					Expect(err).NotTo(HaveOccurred())
+					Expect(err).To(Or(BeNil(), MatchError("cluster cluster-1 not found")))
 				case 2:
 					// Concurrently list clusters.
 					p.ListClusters()
 				case 3:
 					// Concurrently delete a cluster. This will modify the cluster map.
 					clusterToRemove := fmt.Sprintf("cluster-%d", i/4)
-					secret := &corev1.Secret{
-						ObjectMeta: metav1.ObjectMeta{
-							Name: clusterToRemove,
-						},
-					}
-					p.handleSecretDelete(secret)
+					p.removeCluster(clusterToRemove)
 				}
 			}(i)
 		}

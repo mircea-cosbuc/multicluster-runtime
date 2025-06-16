@@ -28,12 +28,15 @@ import (
 	"github.com/go-logr/logr"
 
 	corev1 "k8s.io/api/core/v1"
-	toolscache "k8s.io/client-go/tools/cache"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/tools/clientcmd"
 
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
@@ -62,7 +65,6 @@ func New(opts Options) *Provider {
 	return &Provider{
 		opts:     opts,
 		log:      log.Log.WithName("kubeconfig-provider"),
-		client:   nil, // Will be set in Run
 		clusters: map[string]activeCluster{},
 	}
 }
@@ -88,10 +90,10 @@ type index struct {
 type Provider struct {
 	opts     Options
 	log      logr.Logger
-	client   client.Client
 	lock     sync.RWMutex // protects everything below.
 	clusters map[string]activeCluster
 	indexers []index
+	mgr      mcmanager.Manager
 }
 
 type activeCluster struct {
@@ -113,83 +115,69 @@ func (p *Provider) Get(ctx context.Context, clusterName string) (cluster.Cluster
 	return nil, fmt.Errorf("cluster %s not found", clusterName)
 }
 
-// Run starts the provider and blocks, watching for kubeconfig secrets.
-func (p *Provider) Run(ctx context.Context, mgr mcmanager.Manager) error {
+// SetupWithManager sets up the provider with the manager.
+func (p *Provider) SetupWithManager(ctx context.Context, mgr mcmanager.Manager) error {
 	log := p.log
 	log.Info("Starting kubeconfig provider", "options", p.opts)
 
-	// If client isn't set yet, get it from the manager
-	if p.client == nil && mgr != nil {
-		log.Info("Setting client from manager")
-		p.client = mgr.GetLocalManager().GetClient()
-		if p.client == nil {
-			return fmt.Errorf("failed to get client from manager")
-		}
+	if mgr == nil {
+		return fmt.Errorf("manager is nil")
+	}
+	p.mgr = mgr
+
+	// Get the local manager from the multicluster manager
+	localMgr := mgr.GetLocalManager()
+	if localMgr == nil {
+		return fmt.Errorf("local manager is nil")
 	}
 
-	// Get the informer for secrets
-	secretInf, err := mgr.GetLocalManager().GetCache().GetInformer(ctx, &corev1.Secret{})
+	// Setup the controller to watch for secrets containing kubeconfig data
+	err := ctrl.NewControllerManagedBy(localMgr).
+		For(&corev1.Secret{}, builder.WithPredicates(predicate.NewPredicateFuncs(
+			// Only watch for secrets in the configured namespace and with the configured label
+			func(obj client.Object) bool {
+				return obj.GetNamespace() == p.opts.Namespace &&
+					obj.GetLabels()[p.opts.KubeconfigSecretLabel] == "true"
+			},
+		))).
+		Complete(p)
 	if err != nil {
-		return fmt.Errorf("failed to get secret informer: %w", err)
+		return fmt.Errorf("failed to create controller: %w", err)
 	}
 
-	// Add event handlers for secrets
-	if _, err := secretInf.AddEventHandler(toolscache.FilteringResourceEventHandler{
-		FilterFunc: func(obj interface{}) bool {
-			secret, ok := obj.(*corev1.Secret)
-			if !ok {
-				return false
-			}
-			// Only process secrets in our namespace with our label
-			return secret.Namespace == p.opts.Namespace &&
-				secret.Labels[p.opts.KubeconfigSecretLabel] == "true"
-		},
-		Handler: toolscache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				secret := obj.(*corev1.Secret)
-				log.Info("Processing new secret", "name", secret.Name)
-				if err := p.handleSecret(ctx, secret, mgr); err != nil {
-					log.Error(err, "Failed to handle secret", "name", secret.Name)
-				}
-			},
-			UpdateFunc: func(oldObj, newObj interface{}) {
-				secret := newObj.(*corev1.Secret)
-				log.Info("Processing updated secret", "name", secret.Name)
-				if err := p.handleSecret(ctx, secret, mgr); err != nil {
-					log.Error(err, "Failed to handle secret", "name", secret.Name)
-				}
-			},
-			DeleteFunc: func(obj interface{}) {
-				secret := obj.(*corev1.Secret)
-				log.Info("Processing deleted secret", "name", secret.Name)
-				p.handleSecretDelete(secret)
-			},
-		},
-	}); err != nil {
-		return fmt.Errorf("failed to add event handlers: %w", err)
-	}
-
-	// Block until context is done
-	<-ctx.Done()
-	log.Info("Context cancelled, exiting provider")
-	return ctx.Err()
+	return nil
 }
 
-// handleSecret processes a secret containing kubeconfig data
-func (p *Provider) handleSecret(ctx context.Context, secret *corev1.Secret, mgr mcmanager.Manager) error {
-	if secret == nil {
-		return fmt.Errorf("received nil secret")
+// Reconcile is the main controller function that reconciles secrets containing kubeconfig data
+// when
+func (p *Provider) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	secret := &corev1.Secret{}
+	if err := p.mgr.GetLocalManager().GetClient().Get(ctx, req.NamespacedName, secret); err != nil {
+		// If the secret is not found, remove the cluster and return.
+		// This is a normal occurence when the secret is deleted.
+		if apierrors.IsNotFound(err) {
+			p.removeCluster(req.Name)
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("failed to get secret: %w", err)
 	}
 
 	// Extract name to use as cluster name
 	clusterName := secret.Name
 	log := p.log.WithValues("cluster", clusterName, "secret", fmt.Sprintf("%s/%s", secret.Namespace, secret.Name))
 
+	// If the secret is being deleted, remove the cluster and return.
+	// Will probably only hit this if there is a finalizer on the secret.
+	if secret.DeletionTimestamp != nil {
+		p.removeCluster(clusterName)
+		return ctrl.Result{}, nil
+	}
+
 	// Check if this secret has kubeconfig data
 	kubeconfigData, ok := secret.Data[p.opts.KubeconfigSecretKey]
 	if !ok {
 		log.Info("Secret does not contain kubeconfig data", "key", p.opts.KubeconfigSecretKey)
-		return nil
+		return ctrl.Result{}, nil
 	}
 
 	// Hash the kubeconfig
@@ -204,26 +192,24 @@ func (p *Provider) handleSecret(ctx context.Context, secret *corev1.Secret, mgr 
 	if clusterExists {
 		if ac.Hash == hashStr {
 			log.Info("Cluster already exists and has the same kubeconfig, skipping")
-			return nil
+			return ctrl.Result{}, nil
 		}
 
 		log.Info("Cluster already exists, updating it")
-		if err := p.removeCluster(clusterName); err != nil {
-			return fmt.Errorf("failed to remove existing cluster: %w", err)
-		}
+		p.removeCluster(clusterName)
 	}
 
 	// Parse the kubeconfig
 	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
 	if err != nil {
-		return fmt.Errorf("failed to parse kubeconfig: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to parse kubeconfig: %w", err)
 	}
 
 	// Create a new cluster
 	log.Info("Creating new cluster from kubeconfig")
 	cl, err := cluster.New(restConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create cluster: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to create cluster: %w", err)
 	}
 
 	// Copy indexers to avoid holding lock.
@@ -235,7 +221,7 @@ func (p *Provider) handleSecret(ctx context.Context, secret *corev1.Secret, mgr 
 	// Apply any field indexers
 	for _, idx := range indexers {
 		if err := cl.GetFieldIndexer().IndexField(ctx, idx.object, idx.field, idx.extractValue); err != nil {
-			return fmt.Errorf("failed to index field %q: %w", idx.field, err)
+			return ctrl.Result{}, fmt.Errorf("failed to index field %q: %w", idx.field, err)
 		}
 	}
 
@@ -253,7 +239,7 @@ func (p *Provider) handleSecret(ctx context.Context, secret *corev1.Secret, mgr 
 	log.Info("Waiting for cluster cache to be ready")
 	if !cl.GetCache().WaitForCacheSync(clusterCtx) {
 		cancel() // Cancel context before returning error
-		return fmt.Errorf("failed to wait for cache sync")
+		return ctrl.Result{}, fmt.Errorf("failed to wait for cache sync")
 	}
 	log.Info("Cluster cache is ready")
 
@@ -269,50 +255,32 @@ func (p *Provider) handleSecret(ctx context.Context, secret *corev1.Secret, mgr 
 
 	log.Info("Successfully added cluster")
 
-	// Engage the manager if provided
-	if mgr != nil {
-		if err := mgr.Engage(clusterCtx, clusterName, cl); err != nil {
-			log.Error(err, "Failed to engage manager, removing cluster")
-			p.lock.Lock()
-			delete(p.clusters, clusterName)
-			p.lock.Unlock()
-			cancel() // Cancel the cluster context
-			return fmt.Errorf("failed to engage manager: %w", err)
-		}
-		log.Info("Successfully engaged manager")
+	// Engage the manager
+	if err := p.mgr.Engage(clusterCtx, clusterName, cl); err != nil {
+		log.Error(err, "Failed to engage manager, removing cluster")
+		p.lock.Lock()
+		delete(p.clusters, clusterName)
+		p.lock.Unlock()
+		cancel() // Cancel the cluster context
+		return ctrl.Result{}, fmt.Errorf("failed to engage manager: %w", err)
 	}
+	log.Info("Successfully engaged manager")
 
-	return nil
-}
-
-// handleSecretDelete handles the deletion of a secret
-func (p *Provider) handleSecretDelete(secret *corev1.Secret) {
-	if secret == nil {
-		return
-	}
-
-	clusterName := secret.Name
-	log := p.log.WithValues("cluster", clusterName)
-
-	log.Info("Handling deleted secret")
-
-	// Remove the cluster
-	if err := p.removeCluster(clusterName); err != nil {
-		log.Error(err, "Failed to remove cluster")
-	}
+	return ctrl.Result{}, nil
 }
 
 // removeCluster removes a cluster by name
-func (p *Provider) removeCluster(clusterName string) error {
+func (p *Provider) removeCluster(clusterName string) {
 	log := p.log.WithValues("cluster", clusterName)
-	log.Info("Removing cluster")
 
 	p.lock.Lock()
 	ac, exists := p.clusters[clusterName]
 	if !exists {
 		p.lock.Unlock()
-		return fmt.Errorf("cluster not found")
+		return
 	}
+
+	log.Info("Removing cluster")
 	delete(p.clusters, clusterName)
 	p.lock.Unlock()
 
@@ -322,7 +290,6 @@ func (p *Provider) removeCluster(clusterName string) error {
 	log.Info("Cancelled cluster context")
 
 	log.Info("Successfully removed cluster")
-	return nil
 }
 
 // IndexField indexes a field on all clusters, existing and future.
