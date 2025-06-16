@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
@@ -68,12 +69,32 @@ func main() {
 	}
 
 	// Create the provider first, then the manager with the provider
-	entryLog.Info("Creating provider")
 	provider := kubeconfigprovider.New(providerOpts)
 
 	// Setup a cluster-aware Manager, with the provider to lookup clusters.
-	entryLog.Info("Creating manager")
-	mgr, err := mcmanager.New(ctrl.GetConfigOrDie(), provider, manager.Options{})
+	managerOpts := manager.Options{
+		Metrics: metricsserver.Options{
+			BindAddress: "0", // Disable metrics server
+		},
+	}
+
+	// Log only the serializable fields from manager options
+	safeOpts := map[string]interface{}{
+		"leaderElection": managerOpts.LeaderElection,
+		"metrics": map[string]interface{}{
+			"bindAddress": managerOpts.Metrics.BindAddress,
+		},
+		"healthProbeBindAddress":  managerOpts.HealthProbeBindAddress,
+		"pprofBindAddress":        managerOpts.PprofBindAddress,
+		"gracefulShutdownTimeout": managerOpts.GracefulShutdownTimeout,
+		"controller": map[string]interface{}{
+			"groupKindConcurrency": managerOpts.Controller.GroupKindConcurrency,
+			"cacheSyncTimeout":     managerOpts.Controller.CacheSyncTimeout,
+		},
+	}
+
+	entryLog.Info("Creating manager", "options", safeOpts)
+	mgr, err := mcmanager.New(ctrl.GetConfigOrDie(), provider, managerOpts)
 	if err != nil {
 		entryLog.Error(err, "Unable to create manager")
 		os.Exit(1)

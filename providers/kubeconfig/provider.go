@@ -31,7 +31,6 @@ import (
 	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -87,13 +86,12 @@ type index struct {
 // Provider is a cluster provider that watches for secrets containing kubeconfig data
 // and engages clusters based on those kubeconfigs.
 type Provider struct {
-	opts           Options
-	log            logr.Logger
-	client         client.Client
-	lock           sync.RWMutex // protects everything below.
-	clusters       map[string]activeCluster
-	indexers       []index
-	secretInformer cache.Informer
+	opts     Options
+	log      logr.Logger
+	client   client.Client
+	lock     sync.RWMutex // protects everything below.
+	clusters map[string]activeCluster
+	indexers []index
 }
 
 type activeCluster struct {
@@ -118,7 +116,7 @@ func (p *Provider) Get(ctx context.Context, clusterName string) (cluster.Cluster
 // Run starts the provider and blocks, watching for kubeconfig secrets.
 func (p *Provider) Run(ctx context.Context, mgr mcmanager.Manager) error {
 	log := p.log
-	log.Info("Starting kubeconfig provider", "namespace", p.opts.Namespace, "label", p.opts.KubeconfigSecretLabel)
+	log.Info("Starting kubeconfig provider", "options", p.opts)
 
 	// If client isn't set yet, get it from the manager
 	if p.client == nil && mgr != nil {
@@ -134,9 +132,6 @@ func (p *Provider) Run(ctx context.Context, mgr mcmanager.Manager) error {
 	if err != nil {
 		return fmt.Errorf("failed to get secret informer: %w", err)
 	}
-	p.lock.Lock()
-	p.secretInformer = secretInf
-	p.lock.Unlock()
 
 	// Add event handlers for secrets
 	if _, err := secretInf.AddEventHandler(toolscache.FilteringResourceEventHandler{

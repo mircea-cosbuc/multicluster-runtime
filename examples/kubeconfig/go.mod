@@ -13,7 +13,6 @@ require (
 	k8s.io/apimachinery v0.33.1
 	sigs.k8s.io/controller-runtime v0.21.0
 	sigs.k8s.io/multicluster-runtime v0.0.0-00010101000000-000000000000
-	sigs.k8s.io/multicluster-runtime/providers/kubeconfig v0.0.0-00010101000000-000000000000
 )
 
 require (
