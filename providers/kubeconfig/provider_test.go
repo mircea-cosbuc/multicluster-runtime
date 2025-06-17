@@ -261,6 +261,53 @@ var _ = Describe("Provider Namespace", Ordered, func() {
 		Expect(cms.Items[0].Namespace).To(Equal("island"))
 	})
 
+	It("reconciles objects when the cluster is updated in kubeconfig secret", func() {
+		islandSecret := &corev1.Secret{}
+		err := localCli.Get(ctx, client.ObjectKey{Name: "island", Namespace: kubeconfigSecretNamespace}, islandSecret)
+		Expect(err).NotTo(HaveOccurred())
+
+		kubeconfigData, err := createKubeConfig(jungleCfg)
+		Expect(err).NotTo(HaveOccurred())
+
+		islandSecret.Data = map[string][]byte{
+			kubeconfigSecretKey: kubeconfigData,
+		}
+		err = localCli.Update(ctx, islandSecret)
+		Expect(err).NotTo(HaveOccurred())
+
+		err = jungleCli.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "jungle", Name: "dog", Labels: map[string]string{"type": "animal"}}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func() string {
+			dog := &corev1.ConfigMap{}
+			err := jungleCli.Get(ctx, client.ObjectKey{Namespace: "jungle", Name: "dog"}, dog)
+			Expect(err).NotTo(HaveOccurred())
+			return dog.Data["stomach"]
+		}, "10s").Should(Equal("food"))
+	})
+
+	It("reconciles objects when kubeconfig secret is updated without changing the cluster", func() {
+		jungleSecret := &corev1.Secret{}
+		err := localCli.Get(ctx, client.ObjectKey{Name: "jungle", Namespace: kubeconfigSecretNamespace}, jungleSecret)
+		Expect(err).NotTo(HaveOccurred())
+
+		jungleSecret.ObjectMeta.Annotations = map[string]string{
+			"location": "amazon",
+		}
+		err = localCli.Update(ctx, jungleSecret)
+		Expect(err).NotTo(HaveOccurred())
+
+		err = jungleCli.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "jungle", Name: "leopard", Labels: map[string]string{"type": "animal"}}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func() string {
+			leopard := &corev1.ConfigMap{}
+			err := jungleCli.Get(ctx, client.ObjectKey{Namespace: "jungle", Name: "leopard"}, leopard)
+			Expect(err).NotTo(HaveOccurred())
+			return leopard.Data["stomach"]
+		}, "10s").Should(Equal("food"))
+	})
+
 	It("removes a cluster from the provider when the kubeconfig secret is deleted", func() {
 		err := localCli.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "island", Namespace: kubeconfigSecretNamespace}})
 		Expect(err).NotTo(HaveOccurred())
@@ -282,7 +329,8 @@ func ignoreCanceled(err error) error {
 	return err
 }
 
-func createKubeconfigSecret(ctx context.Context, name string, cfg *rest.Config, cl client.Client) error {
+func createKubeConfig(cfg *rest.Config) ([]byte, error) {
+	name := "cluster"
 	apiConfig := api.Config{
 		Clusters: map[string]*api.Cluster{
 			name: {
@@ -306,6 +354,14 @@ func createKubeconfigSecret(ctx context.Context, name string, cfg *rest.Config, 
 		CurrentContext: name,
 	}
 	kubeconfigData, err := clientcmd.Write(apiConfig)
+	if err != nil {
+		return nil, err
+	}
+	return kubeconfigData, nil
+}
+
+func createKubeconfigSecret(ctx context.Context, name string, cfg *rest.Config, cl client.Client) error {
+	kubeconfigData, err := createKubeConfig(cfg)
 	if err != nil {
 		return err
 	}
