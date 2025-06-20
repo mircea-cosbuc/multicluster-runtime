@@ -132,7 +132,7 @@ func (p *Provider) addIndexer(idx index) {
 func (p *Provider) Get(ctx context.Context, clusterName string) (cluster.Cluster, error) {
 	ac, exists := p.getCluster(clusterName)
 	if !exists {
-		return nil, fmt.Errorf("cluster %s not found", clusterName)
+		return nil, multicluster.ErrClusterNotFound
 	}
 	return ac.Cluster, nil
 }
