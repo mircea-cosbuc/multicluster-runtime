@@ -66,10 +66,7 @@ var _ = Describe("Provider Cluster Inventory API", Ordered, func() {
 
 	var cliMember client.Client
 	var profileMember *clusterinventoryv1alpha1.ClusterProfile
-	// var kubeConfigSecretMember corev1.Secret
-	// var sa1Member corev1.ServiceAccount
 	var sa1TokenMember string
-	// var sa2Member corev1.ServiceAccount
 	var sa2TokenMember string
 
 	BeforeAll(func() {
@@ -173,6 +170,7 @@ var _ = Describe("Provider Cluster Inventory API", Ordered, func() {
 				},
 			}
 			Expect(cliHub.Create(ctx, profileMember)).To(Succeed())
+			// Mock the control plane health condition
 			profileMember.Status.Conditions = append(profileMember.Status.Conditions, metav1.Condition{
 				Type:               clusterinventoryv1alpha1.ClusterConditionControlPlaneHealthy,
 				Status:             metav1.ConditionTrue,
