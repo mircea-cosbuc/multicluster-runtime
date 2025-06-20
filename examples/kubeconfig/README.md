@@ -14,7 +14,8 @@ The kubeconfig provider allows you to:
 ```
 examples/kubeconfig/
 ├── scripts/                 # Utility scripts
-│   └── create-kubeconfig-secret.sh
+│   ├── create-kubeconfig-secret.sh
+│   └── rules.yaml          # Default RBAC rules template
 └── main.go                 # Example operator implementation
 ```
 
@@ -40,35 +41,96 @@ The script will:
 - Use the specified service account from the remote cluster
 - Generate a kubeconfig using the service account's token
 - Store the kubeconfig in a secret in your local cluster
+- Automatically create RBAC resources (Role/ClusterRole and bindings) with permissions defined in `rules.yaml` 
 
-Command line options:
+#### Command Line Options
+
 - `-c, --context`: Kubeconfig context to use (required)
 - `--name`: Name for the secret (defaults to context name)
 - `-n, --namespace`: Namespace to create the secret in (default: "default")
-- `-a, --service-account`: Service account name to use from the remote cluster (default: "default")
+- `-a, --service-account`: Service account name to use from the remote cluster (default: "multicluster-kubeconfig-provider")
+- `-t, --role-type`: Create Role or ClusterRole (`role`|`clusterrole`) (default: "clusterrole")
+- `-r, --rules-file`: Path to custom rules file (default: `rules.yaml` in script directory)
+- `--skip-create-rbac`: Skip creating RBAC resources (Role/ClusterRole and bindings)
+- `-h, --help`: Show help message
 
-### 2. Customizing RBAC Rules
+#### Examples
 
-The service account in the remote cluster must have the necessary RBAC permissions for your operator to function. Edit the RBAC templates in the `rbac/` directory to define the permissions your operator needs:
+```bash
+# Basic usage with default settings
+./scripts/create-kubeconfig-secret.sh -c prod-cluster
 
-```yaml
-# rbac/clusterrole.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: ${SECRET_NAME}-role
-rules:
-# Add permissions for your operator <--------------------------------
-- apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["list", "get", "watch"]  # watch is needed for controllers that observe resources
+# Create namespace-scoped Role instead of ClusterRole
+./scripts/create-kubeconfig-secret.sh -c prod-cluster -t role
+
+# Use custom RBAC rules file
+./scripts/create-kubeconfig-secret.sh -c prod-cluster -r ./custom-rules.yaml
+
+# Skip RBAC creation (manual RBAC setup)
+./scripts/create-kubeconfig-secret.sh -c prod-cluster --skip-create-rbac
+
+# Full example with all options
+./scripts/create-kubeconfig-secret.sh \
+  --name my-cluster \
+  -n my-namespace \
+  -c prod-cluster \
+  -a my-service-account \
+  -t clusterrole \
+  -r ./my-rules.yaml
 ```
 
-Important RBAC considerations:
-- Use `watch` verb if your controller needs to observe resource changes
-- Use `list` and `get` for reading resources
-- Use `create`, `update`, `patch`, `delete` for modifying resources
-- Consider using `Role` instead of `ClusterRole` if you only need namespace-scoped permissions
+### 2. RBAC Configuration
+
+The script automatically creates RBAC resources with the necessary permissions for your operator. By default, it uses the rules defined in `scripts/rules.yaml`:
+
+```yaml
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["list", "get", "watch"]
+```
+
+#### Customizing RBAC Rules
+
+You can customize the RBAC permissions by:
+
+1. **Editing the default rules file** (`scripts/rules.yaml`):
+```yaml
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "pods"]
+    verbs: ["list", "get", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["list", "get", "watch"]
+```
+
+2. **Using a custom rules file** with the `-r` option:
+```bash
+./scripts/create-kubeconfig-secret.sh -c prod-cluster -r ./my-custom-rules.yaml
+```
+
+3. **Choosing between Role and ClusterRole**:
+   - Use `-t role` for namespace-scoped permissions
+   - Use `-t clusterrole` (default) for cluster-wide permissions
+
+#### RBAC Resource Creation
+
+The script creates the following RBAC resources automatically:
+
+- **Service Account**: If it doesn't exist, creates the specified service account
+- **Role/ClusterRole**: With the permissions defined in the rules file
+- **RoleBinding/ClusterRoleBinding**: Binds the service account to the role
+
+#### Skipping RBAC Creation
+
+If you prefer to manage RBAC manually, use the `--skip-create-rbac` flag:
+
+```bash
+./scripts/create-kubeconfig-secret.sh -c prod-cluster --skip-create-rbac
+```
+
+This will only create the kubeconfig secret without setting up any RBAC resources.
 
 ### 3. Implementing Your Operator
 
@@ -99,7 +161,7 @@ Your controllers can then use the manager to access any cluster and view the res
    - Creates a new controller-runtime cluster
    - Makes the cluster available to your controllers
 3. Your controllers can access any cluster through the manager
-4. RBAC rules ensure your operator has the necessary permissions in each cluster
+4. RBAC Rules on the remote clusters ensure the SA operator on the cluster of the controller has the necessary permissions in the remote clusters
 
 ## Labels and Configuration
 
@@ -107,4 +169,10 @@ The provider uses the following labels and keys by default:
 - Label: `sigs.k8s.io/multicluster-runtime-kubeconfig: "true"`
 - Secret data key: `kubeconfig`
 
-You can customize these in the provider options when creating it. 
+You can customize these in the provider options when creating it.
+
+## Prerequisites
+
+- `kubectl` configured with access to both the local and remote clusters
+- `yq` command-line tool installed (required for RBAC rule processing)
+- Service account with appropriate permissions in the remote cluster (if not using automatic RBAC creation script) 
