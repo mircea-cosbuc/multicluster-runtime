@@ -318,7 +318,7 @@ func (p *Provider) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 	}
 	for _, idx := range p.indexers {
 		if err := cl.GetCache().IndexField(ctx, idx.object, idx.field, idx.extractValue); err != nil {
-			return reconcile.Result{}, fmt.Errorf("failed to index field %q for ClusterProfile=%s: %w", idx.field, key, err)
+			return reconcile.Result{}, fmt.Errorf("failed to index field %q for %s=%s: %w", idx.field, idx.object.GetObjectKind().GroupVersionKind().String(), key, err)
 		}
 	}
 	clusterCtx, cancel := context.WithCancel(ctx)
