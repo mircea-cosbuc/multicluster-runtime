@@ -19,6 +19,7 @@ package clusterinventoryapi
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -37,8 +39,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
@@ -47,15 +51,66 @@ import (
 
 var _ multicluster.Provider = &Provider{}
 
-var (
-	// GetKubeConfigFromSecret is a function that fetches the kubeconfig for a ClusterProfile from Secret
-	// It supposes that the Secret is managed by following "Push Model via Credentials in Secret" in "KEP-4322: ClusterProfile API"
-	// ref: https://github.com/kubernetes/enhancements/blob/master/keps/sig-multicluster/4322-cluster-inventory/README.md#push-model-via-credentials-in-secret-not-recommended
-	GetKubeConfigFromSecret = func(ctx context.Context, cli client.Client, consumerName string, clp *clusterinventoryv1alpha1.ClusterProfile) (*rest.Config, error) {
+const (
+	labelKeyClusterInventoryConsumer = "x-k8s.io/cluster-inventory-consumer"
+	labelKeyClusterProfile           = "x-k8s.io/cluster-profile"
+)
+
+// Options are the options for the Cluster-API cluster Provider.
+type Options struct {
+	// ConsumerName is the name of the consumer that will use the cluster inventory API.
+	ConsumerName string
+
+	// ClusterOptions are the options passed to the cluster constructor.
+	ClusterOptions []cluster.Option
+
+	// GetKubeConfig is a function that returns the kubeconfig secret for a cluster profile.
+	GetKubeConfig func(ctx context.Context, cli client.Client, clp *clusterinventoryv1alpha1.ClusterProfile) (*rest.Config, error)
+
+	// NewCluster is a function that creates a new cluster from a rest.Config.
+	// The cluster will be started by the provider.
+	NewCluster func(ctx context.Context, clp *clusterinventoryv1alpha1.ClusterProfile, cfg *rest.Config, opts ...cluster.Option) (cluster.Cluster, error)
+
+	// CustomWatches can add custom watches to the provider controller
+	CustomWatches []CustomWatch
+}
+
+// CustomWatch specifies a custom watch spec that can be added to the provider controller.
+type CustomWatch struct {
+	Object       client.Object
+	EventHandler handler.TypedEventHandler[client.Object, reconcile.Request]
+	Opts         []builder.WatchesOption
+}
+
+type index struct {
+	object       client.Object
+	field        string
+	extractValue client.IndexerFunc
+}
+
+// Provider is a cluster Provider that works with Cluster Inventory API.
+type Provider struct {
+	opts   Options
+	log    logr.Logger
+	client client.Client
+
+	lock       sync.RWMutex
+	mcMgr      mcmanager.Manager
+	clusters   map[string]cluster.Cluster
+	cancelFns  map[string]context.CancelFunc
+	kubeconfig map[string]*rest.Config
+	indexers   []index
+}
+
+// GetKubeConfigFromSecret returns a function that fetches the kubeconfig for a specified consumer for ClusterProfile from Secret
+// It supposes that the Secrets for ClusterProfiles are managed by following "Push Model via Credentials in Secret" in "KEP-4322: ClusterProfile API"
+// ref: https://github.com/kubernetes/enhancements/blob/master/keps/sig-multicluster/4322-cluster-inventory/README.md#push-model-via-credentials-in-secret-not-recommended
+func GetKubeConfigFromSecret(consumerName string) func(ctx context.Context, cli client.Client, clp *clusterinventoryv1alpha1.ClusterProfile) (*rest.Config, error) {
+	return func(ctx context.Context, cli client.Client, clp *clusterinventoryv1alpha1.ClusterProfile) (*rest.Config, error) {
 		secrets := corev1.SecretList{}
 		if err := cli.List(ctx, &secrets, client.InNamespace(clp.Namespace), client.MatchingLabels{
-			"x-k8s.io/cluster-inventory-consumer": consumerName,
-			"x-k8s.io/cluster-profile":            clp.Name,
+			labelKeyClusterInventoryConsumer: consumerName,
+			labelKeyClusterProfile:           clp.Name,
 		}); err != nil {
 			return nil, fmt.Errorf("failed to list secrets: %w", err)
 		}
@@ -76,27 +131,50 @@ var (
 		}
 		return clientcmd.RESTConfigFromKubeConfig(data)
 	}
-)
+}
 
-// Options are the options for the Cluster-API cluster Provider.
-type Options struct {
-	// ConsumerName is the name of the consumer that will use the cluster inventory API.
-	ConsumerName string
+// WatchKubeConfigSecret returns a CustomWatch that watches for kubeconfig secrets for specified consumer of ClusterProfile
+// It supposes that the Secrets for ClusterProfiles are managed by following "Push Model via Credentials in Secret" in "KEP-4322: ClusterProfile API"
+// ref: https://github.com/kubernetes/enhancements/blob/master/keps/sig-multicluster/4322-cluster-inventory/README.md#push-model-via-credentials-in-secret-not-recommended
+func WatchKubeConfigSecret(consumerName string) CustomWatch {
+	return CustomWatch{
+		Object: &corev1.Secret{},
+		EventHandler: handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+			secret, ok := obj.(*corev1.Secret)
+			if !ok {
+				return nil
+			}
 
-	// ClusterOptions are the options passed to the cluster constructor.
-	ClusterOptions []cluster.Option
+			if secret.GetLabels() == nil ||
+				secret.GetLabels()[labelKeyClusterInventoryConsumer] != consumerName ||
+				secret.GetLabels()[labelKeyClusterProfile] == "" {
+				return nil
+			}
 
-	// GetKubeConfig is a function that returns the kubeconfig secret for a cluster profile.
-	GetKubeConfig func(ctx context.Context, cli client.Client, consumerName string, clp *clusterinventoryv1alpha1.ClusterProfile) (*rest.Config, error)
-
-	// NewCluster is a function that creates a new cluster from a rest.Config.
-	// The cluster will be started by the provider.
-	NewCluster func(ctx context.Context, clp *clusterinventoryv1alpha1.ClusterProfile, cfg *rest.Config, opts ...cluster.Option) (cluster.Cluster, error)
+			return []reconcile.Request{{
+				NamespacedName: types.NamespacedName{
+					Namespace: secret.GetNamespace(),
+					Name:      secret.GetLabels()[labelKeyClusterProfile],
+				},
+			}}
+		}),
+		Opts: []builder.WatchesOption{
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(object client.Object) bool {
+				secret, ok := object.(*corev1.Secret)
+				if !ok {
+					return false
+				}
+				return secret.GetLabels()[labelKeyClusterInventoryConsumer] == consumerName &&
+					secret.GetLabels()[labelKeyClusterProfile] != ""
+			})),
+		},
+	}
 }
 
 func setDefaults(opts *Options, cli client.Client) {
 	if opts.GetKubeConfig == nil {
-		opts.GetKubeConfig = GetKubeConfigFromSecret
+		opts.GetKubeConfig = GetKubeConfigFromSecret(opts.ConsumerName)
+		opts.CustomWatches = append(opts.CustomWatches, WatchKubeConfigSecret(opts.ConsumerName))
 	}
 	if opts.NewCluster == nil {
 		opts.NewCluster = func(ctx context.Context, clp *clusterinventoryv1alpha1.ClusterProfile, cfg *rest.Config, opts ...cluster.Option) (cluster.Cluster, error) {
@@ -108,42 +186,36 @@ func setDefaults(opts *Options, cli client.Client) {
 // New creates a new Cluster Inventory API cluster Provider.
 func New(localMgr manager.Manager, opts Options) (*Provider, error) {
 	p := &Provider{
-		opts:      opts,
-		log:       log.Log.WithName("cluster-inventory-api-cluster-provider"),
-		client:    localMgr.GetClient(),
-		clusters:  map[string]cluster.Cluster{},
-		cancelFns: map[string]context.CancelFunc{},
+		opts:       opts,
+		log:        log.Log.WithName("cluster-inventory-api-cluster-provider"),
+		client:     localMgr.GetClient(),
+		clusters:   map[string]cluster.Cluster{},
+		cancelFns:  map[string]context.CancelFunc{},
+		kubeconfig: map[string]*rest.Config{},
 	}
 
 	setDefaults(&p.opts, p.client)
 
-	if err := builder.ControllerManagedBy(localMgr).
+	// Create a controller builder
+	controllerBuilder := builder.ControllerManagedBy(localMgr).
 		For(&clusterinventoryv1alpha1.ClusterProfile{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 1}). // no prallelism.
-		Complete(p); err != nil {
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}) // no parallelism.
+
+	// Apply any custom watches provided by the user
+	for _, customWatch := range p.opts.CustomWatches {
+		controllerBuilder.Watches(
+			customWatch.Object,
+			customWatch.EventHandler,
+			customWatch.Opts...,
+		)
+	}
+
+	// Complete the controller setup
+	if err := controllerBuilder.Complete(p); err != nil {
 		return nil, fmt.Errorf("failed to create controller: %w", err)
 	}
 
 	return p, nil
-}
-
-type index struct {
-	object       client.Object
-	field        string
-	extractValue client.IndexerFunc
-}
-
-// Provider is a cluster Provider that works with Cluster Inventory API.
-type Provider struct {
-	opts   Options
-	log    logr.Logger
-	client client.Client
-
-	lock      sync.RWMutex
-	mcMgr     mcmanager.Manager
-	clusters  map[string]cluster.Cluster
-	cancelFns map[string]context.CancelFunc
-	indexers  []index
 }
 
 // Get returns the cluster with the given name, if it is known.
@@ -206,12 +278,6 @@ func (p *Provider) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 		return reconcile.Result{RequeueAfter: time.Second * 2}, nil
 	}
 
-	// already engaged?
-	if _, ok := p.clusters[key]; ok {
-		log.Info("ClusterProfile already engaged")
-		return reconcile.Result{}, nil
-	}
-
 	// ready?
 	controlPlaneHealthyCondition := meta.FindStatusCondition(clp.Status.Conditions, clusterinventoryv1alpha1.ClusterConditionControlPlaneHealthy)
 	if controlPlaneHealthyCondition == nil || controlPlaneHealthyCondition.Status != metav1.ConditionTrue {
@@ -220,10 +286,28 @@ func (p *Provider) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 	}
 
 	// get kubeconfig
-	cfg, err := p.opts.GetKubeConfig(ctx, p.client, p.opts.ConsumerName, clp)
+	cfg, err := p.opts.GetKubeConfig(ctx, p.client, clp)
 	if err != nil {
 		log.Error(err, "Failed to get kubeconfig for ClusterProfile")
 		return reconcile.Result{}, fmt.Errorf("failed to get kubeconfig for ClusterProfile=%s: %w", key, err)
+	}
+
+	// already engaged and kubeconfig is not changed?
+	if _, ok := p.clusters[key]; ok {
+		if p.kubeconfig[key] != nil && reflect.DeepEqual(p.kubeconfig[key], cfg) {
+			log.Info("ClusterProfile already engaged and kubeconfig is unchanged, skipping")
+			return reconcile.Result{}, nil
+		}
+
+		log.Info("ClusterProfile already engaged but kubeconfig is changed, re-engaging the ClusterProfile")
+		// disengage existing cluster first if it exists.
+		if cancel, ok := p.cancelFns[key]; ok {
+			log.V(3).Info("Cancelling existing context for ClusterProfile")
+			cancel()
+			delete(p.clusters, key)
+			delete(p.cancelFns, key)
+			delete(p.kubeconfig, key)
+		}
 	}
 
 	// create cluster.
@@ -253,6 +337,7 @@ func (p *Provider) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 	// remember.
 	p.clusters[key] = cl
 	p.cancelFns[key] = cancel
+	p.kubeconfig[key] = cfg
 
 	log.Info("Added new cluster for ClusterProfile")
 
@@ -261,6 +346,7 @@ func (p *Provider) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 		log.Error(err, "failed to engage manager for ClusterProfile")
 		delete(p.clusters, key)
 		delete(p.cancelFns, key)
+		delete(p.kubeconfig, key)
 		return reconcile.Result{}, err
 	}
 
