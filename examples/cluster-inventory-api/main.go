@@ -52,7 +52,7 @@ func main() {
 	entryLog := ctrllog.Log.WithName("entrypoint")
 	ctx := signals.SetupSignalHandler()
 
-	// Start local manager to read the Cluster-API objects.
+	// Start local manager to read the Cluster Inventory API objects.
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		entryLog.Error(err, "unable to get kubeconfig")
