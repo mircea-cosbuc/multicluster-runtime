@@ -114,7 +114,7 @@ type Provider struct {
 	indexers   []index
 }
 
-// KubeconfigManagementStrategySecret returns a KubeconfigStrategy that fetches the kubeconfig from a Secret
+// KubeconfigStrategySecret returns a KubeconfigStrategy that fetches the kubeconfig from a Secret
 // labeled with "x-k8s.io/cluster-inventory-consumer" and "x-k8s.io/cluster-profile" labels.
 // This is the "Push Model via Credentials in Secret" as described in KEP-4322: ClusterProfile API.
 // ref: https://github.com/kubernetes/enhancements/blob/master/keps/sig-multicluster/4322-cluster-inventory/README.md#push-model-via-credentials-in-secret-not-recommended
