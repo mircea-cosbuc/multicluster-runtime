@@ -58,14 +58,9 @@ func main() {
 		entryLog.Error(err, "unable to get kubeconfig")
 		os.Exit(1)
 	}
-	localMgr, err := manager.New(cfg, manager.Options{})
-	if err != nil {
-		entryLog.Error(err, "unable to set up overall controller manager")
-		os.Exit(1)
-	}
 
 	// Create the provider against the local manager.
-	provider, err := clusterinventoryapi.New(localMgr, clusterinventoryapi.Options{
+	provider := clusterinventoryapi.New(clusterinventoryapi.Options{
 		ConsumerName: "cluster-inventory-api-consumer",
 	})
 	if err != nil {
@@ -83,6 +78,12 @@ func main() {
 	})
 	if err != nil {
 		entryLog.Error(err, "unable to set up overall controller manager")
+		os.Exit(1)
+	}
+
+	// Setting up the provider with multi-cluster manager.
+	if err := provider.SetupWithManager(mcMgr); err != nil {
+		entryLog.Error(err, "unable to set up provider with manager")
 		os.Exit(1)
 	}
 
@@ -119,12 +120,6 @@ func main() {
 
 	// Starting everything.
 	g, ctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		return ignoreCanceled(localMgr.Start(ctx))
-	})
-	g.Go(func() error {
-		return ignoreCanceled(provider.Run(ctx, mcMgr))
-	})
 	g.Go(func() error {
 		return ignoreCanceled(mcMgr.Start(ctx))
 	})

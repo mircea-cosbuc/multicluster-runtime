@@ -41,7 +41,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -193,17 +192,32 @@ func setDefaults(opts *Options, cli client.Client) {
 }
 
 // New creates a new Cluster Inventory API cluster Provider.
-func New(localMgr manager.Manager, opts Options) (*Provider, error) {
+// You must call SetupWithManager to set up the provider with the manager.
+func New(opts Options) *Provider {
 	p := &Provider{
 		opts:       opts,
 		log:        log.Log.WithName("cluster-inventory-api-cluster-provider"),
-		client:     localMgr.GetClient(),
 		clusters:   map[string]cluster.Cluster{},
 		cancelFns:  map[string]context.CancelFunc{},
 		kubeconfig: map[string]*rest.Config{},
 	}
-
 	setDefaults(&p.opts, p.client)
+	return p
+}
+
+// SetupWithManager sets up the provider with the manager.
+func (p *Provider) SetupWithManager(mgr mcmanager.Manager) error {
+	if mgr == nil {
+		return fmt.Errorf("manager is nil")
+	}
+	p.mcMgr = mgr
+
+	// Get the local manager from the multi-cluster manager.
+	localMgr := mgr.GetLocalManager()
+	if localMgr == nil {
+		return fmt.Errorf("local manager is nil")
+	}
+	p.client = localMgr.GetClient()
 
 	// Create a controller builder
 	controllerBuilder := builder.ControllerManagedBy(localMgr).
@@ -221,10 +235,10 @@ func New(localMgr manager.Manager, opts Options) (*Provider, error) {
 
 	// Complete the controller setup
 	if err := controllerBuilder.Complete(p); err != nil {
-		return nil, fmt.Errorf("failed to create controller: %w", err)
+		return fmt.Errorf("failed to create controller: %w", err)
 	}
 
-	return p, nil
+	return nil
 }
 
 // Get returns the cluster with the given name, if it is known.
@@ -238,19 +252,7 @@ func (p *Provider) Get(_ context.Context, clusterName string) (cluster.Cluster, 
 	return nil, multicluster.ErrClusterNotFound
 }
 
-// Run starts the provider and blocks.
-func (p *Provider) Run(ctx context.Context, mgr mcmanager.Manager) error {
-	p.log.Info("Starting Cluster Inventory API cluster provider")
-
-	p.lock.Lock()
-	p.mcMgr = mgr
-	p.lock.Unlock()
-
-	<-ctx.Done()
-
-	return ctx.Err()
-}
-
+// Reconcile is the reconcile loop for the Cluster Inventory API cluster Provider.
 func (p *Provider) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	key := req.NamespacedName.String()
 

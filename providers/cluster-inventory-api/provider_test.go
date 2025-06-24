@@ -58,7 +58,6 @@ var _ = Describe("Provider Cluster Inventory API", Ordered, func() {
 	g, ctx := errgroup.WithContext(ctx)
 
 	const consumerName = "hub"
-	var localMgr manager.Manager
 	var provider *Provider
 	var mgr mcmanager.Manager
 
@@ -77,23 +76,21 @@ var _ = Describe("Provider Cluster Inventory API", Ordered, func() {
 		cliMember, err = client.New(cfgMember, client.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
-		By("Setting up the Local manager", func() {
-			localMgr, err = manager.New(cfgHub, manager.Options{})
-			Expect(err).NotTo(HaveOccurred())
-		})
-
 		By("Setting up the Provider", func() {
-			var err error
-			provider, err = New(localMgr, Options{
+			provider = New(Options{
 				ConsumerName: consumerName,
 			})
-			Expect(err).NotTo(HaveOccurred())
 			Expect(provider).NotTo(BeNil())
 		})
 
 		By("Setting up the cluster-aware manager, with the provider to lookup clusters", func() {
 			var err error
 			mgr, err = mcmanager.New(cfgHub, provider, manager.Options{})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		By("Setting up the provider controller", func() {
+			err := provider.SetupWithManager(mgr)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
@@ -142,14 +139,7 @@ var _ = Describe("Provider Cluster Inventory API", Ordered, func() {
 		})
 
 		By("Starting the provider, cluster, manager, and controller", func() {
-			g.Go(func() error {
-				err := localMgr.Start(ctx)
-				return ignoreCanceled(err)
-			})
-			g.Go(func() error {
-				err := provider.Run(ctx, mgr)
-				return ignoreCanceled(err)
-			})
+
 			g.Go(func() error {
 				err := mgr.Start(ctx)
 				return ignoreCanceled(err)
