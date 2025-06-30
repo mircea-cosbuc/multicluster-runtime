@@ -194,12 +194,10 @@ func (p *Provider) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 	}
 
 	// Extract and validate kubeconfig data
-	kubeconfigData, err := p.extractKubeconfigData(secret, log)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if kubeconfigData == nil {
-		return ctrl.Result{}, nil // No kubeconfig data found
+	kubeconfigData, ok := secret.Data[p.opts.KubeconfigSecretKey]
+	if !ok || len(kubeconfigData) == 0 {
+		log.Info("Secret does not contain kubeconfig data, skipping", "key", p.opts.KubeconfigSecretKey)
+		return ctrl.Result{}, nil
 	}
 
 	// Hash the kubeconfig for change detection
@@ -237,16 +235,6 @@ func (p *Provider) getSecret(ctx context.Context, namespacedName client.ObjectKe
 		return nil, fmt.Errorf("failed to get secret: %w", err)
 	}
 	return secret, nil
-}
-
-// extractKubeconfigData extracts kubeconfig data from a secret
-func (p *Provider) extractKubeconfigData(secret *corev1.Secret, log logr.Logger) ([]byte, error) {
-	kubeconfigData, ok := secret.Data[p.opts.KubeconfigSecretKey]
-	if !ok {
-		log.Info("Secret does not contain kubeconfig data", "key", p.opts.KubeconfigSecretKey)
-		return nil, nil
-	}
-	return kubeconfigData, nil
 }
 
 // hashKubeconfig creates a hash of the kubeconfig data
