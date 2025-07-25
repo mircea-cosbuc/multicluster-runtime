@@ -48,12 +48,13 @@ import (
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
+	"sigs.k8s.io/multicluster-runtime/providers/cluster-inventory-api/kubeconfigstrategy"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("Provider Cluster Inventory API", Ordered, func() {
+var _ = Describe("Provider Cluster Inventory API With Secret Kubeconfig Strategy", Ordered, func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	g, ctx := errgroup.WithContext(ctx)
 
@@ -77,9 +78,14 @@ var _ = Describe("Provider Cluster Inventory API", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Setting up the Provider", func() {
-			provider = New(Options{
-				ConsumerName: consumerName,
+			provider, err = New(Options{
+				KubeconfigStrategyOption: kubeconfigstrategy.Option{
+					Secret: kubeconfigstrategy.SecretStrategyOption{
+						ConsumerName: consumerName,
+					},
+				},
 			})
+			Expect(err).NotTo(HaveOccurred())
 			Expect(provider).NotTo(BeNil())
 		})
 
@@ -390,11 +396,11 @@ users:
 
 	_, err := controllerutil.CreateOrUpdate(ctx, cli, kubeConfigSecret, func() error {
 		kubeConfigSecret.Labels = map[string]string{
-			labelKeyClusterProfile:           clusterProfile.Name,
-			labelKeyClusterInventoryConsumer: consumerName,
+			kubeconfigstrategy.SecretLabelKeyClusterProfile:           clusterProfile.Name,
+			kubeconfigstrategy.SecretLabelKeyClusterInventoryConsumer: consumerName,
 		}
 		kubeConfigSecret.StringData = map[string]string{
-			dataKeyKubeConfig: kubeconfigStr,
+			kubeconfigstrategy.SecretDataKeyKubeConfig: kubeconfigStr,
 		}
 		return nil
 	})

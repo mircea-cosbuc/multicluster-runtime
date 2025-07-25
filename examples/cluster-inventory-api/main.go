@@ -40,7 +40,9 @@ import (
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
+
 	clusterinventoryapi "sigs.k8s.io/multicluster-runtime/providers/cluster-inventory-api"
+	"sigs.k8s.io/multicluster-runtime/providers/cluster-inventory-api/kubeconfigstrategy"
 )
 
 func init() {
@@ -60,8 +62,13 @@ func main() {
 	}
 
 	// Create the provider against the local manager.
-	provider := clusterinventoryapi.New(clusterinventoryapi.Options{
-		ConsumerName: "cluster-inventory-api-consumer",
+	provider, err := clusterinventoryapi.New(clusterinventoryapi.Options{
+		KubeconfigStrategyOption: kubeconfigstrategy.Option{
+			// Use the Secret strategy with a specific consumer name.
+			Secret: kubeconfigstrategy.SecretStrategyOption{
+				ConsumerName: "cluster-inventory-api-consumer",
+			},
+		},
 	})
 	if err != nil {
 		entryLog.Error(err, "unable to create provider")
