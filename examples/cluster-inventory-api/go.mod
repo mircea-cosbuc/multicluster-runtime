@@ -1,6 +1,6 @@
 module sigs.k8s.io/multicluster-runtime/examples/cluster-inventory-api
 
-go 1.24.2
+go 1.24.0
 
 replace (
 	sigs.k8s.io/multicluster-runtime => ../..
@@ -8,13 +8,12 @@ replace (
 )
 
 require (
-	golang.org/x/sync v0.15.0
-	k8s.io/api v0.33.1
-	k8s.io/apimachinery v0.33.1
-	k8s.io/client-go v0.33.1
+	k8s.io/api v0.33.0
+	k8s.io/apimachinery v0.33.0
+	k8s.io/client-go v0.33.0
 	sigs.k8s.io/cluster-inventory-api v0.0.0-20250702132726-0f613c6275a5
 	sigs.k8s.io/controller-runtime v0.21.0
-	sigs.k8s.io/multicluster-runtime v0.21.0-alpha.8
+	sigs.k8s.io/multicluster-runtime v0.0.0-00010101000000-000000000000
 	sigs.k8s.io/multicluster-runtime/providers/cluster-inventory-api v0.0.0-00010101000000-000000000000
 )
 
@@ -53,6 +52,7 @@ require (
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/net v0.39.0 // indirect
 	golang.org/x/oauth2 v0.29.0 // indirect
+	golang.org/x/sync v0.13.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/term v0.31.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
