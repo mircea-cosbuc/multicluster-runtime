@@ -22,7 +22,6 @@ import (
 	"flag"
 	"os"
 
-	"golang.org/x/sync/errgroup"
 	clusterinventoryv1alpha1 "sigs.k8s.io/cluster-inventory-api/apis/v1alpha1"
 	"sigs.k8s.io/cluster-inventory-api/pkg/credentials"
 
@@ -141,12 +140,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Starting everything.
-	g, ctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		return ignoreCanceled(mcMgr.Start(ctx))
-	})
-	if err := g.Wait(); err != nil {
+	if err := mcMgr.Start(ctx); ignoreCanceled(err) != nil {
 		entryLog.Error(err, "unable to start")
 		os.Exit(1)
 	}
