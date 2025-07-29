@@ -29,8 +29,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -63,9 +62,6 @@ func New(opts Options) *Provider {
 	if opts.KubeconfigSecretKey == "" {
 		opts.KubeconfigSecretKey = DefaultKubeconfigSecretKey
 	}
-	if opts.Scheme == nil {
-		opts.Scheme = scheme.Scheme
-	}
 
 	return &Provider{
 		opts:     opts,
@@ -82,8 +78,10 @@ type Options struct {
 	KubeconfigSecretLabel string
 	// KubeconfigSecretKey is the key in the secret data that contains the kubeconfig.
 	KubeconfigSecretKey string
-	// Scheme is the scheme to use for the clusters.
-	Scheme *runtime.Scheme
+	// ClusterOptions is the list of options to pass to the cluster object.
+	ClusterOptions []cluster.Option
+	// RESTOptions is the list of options to pass to the rest client.
+	RESTOptions []func(cfg *rest.Config) error
 }
 
 type index struct {
@@ -259,11 +257,16 @@ func (p *Provider) createAndEngageCluster(ctx context.Context, clusterName strin
 		return fmt.Errorf("failed to parse kubeconfig: %w", err)
 	}
 
+	// Apply REST options
+	for _, opt := range p.opts.RESTOptions {
+		if err := opt(restConfig); err != nil {
+			return fmt.Errorf("failed to apply REST option: %w", err)
+		}
+	}
+
 	// Create a new cluster
 	log.Info("Creating new cluster from kubeconfig")
-	cl, err := cluster.New(restConfig, func(o *cluster.Options) {
-		o.Scheme = p.opts.Scheme
-	})
+	cl, err := cluster.New(restConfig, p.opts.ClusterOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to create cluster: %w", err)
 	}

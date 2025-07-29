@@ -28,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/clientcmd/api"
@@ -42,6 +43,7 @@ import (
 
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	mcluster "sigs.k8s.io/multicluster-runtime/pkg/multicluster"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -79,6 +81,18 @@ var _ = Describe("Provider Namespace", Ordered, func() {
 			KubeconfigSecretLabel: kubeconfigSecretLabel,
 			Namespace:             kubeconfigSecretNamespace,
 			KubeconfigSecretKey:   kubeconfigSecretKey,
+			RESTOptions: []func(cfg *rest.Config) error{
+				func(cfg *rest.Config) error {
+					cfg.QPS = 100
+					cfg.Burst = 200
+					return nil
+				},
+			},
+			ClusterOptions: []cluster.Option{
+				func(clusterOptions *cluster.Options) {
+					clusterOptions.Scheme = scheme.Scheme
+				},
+			},
 		})
 
 		By("Creating a namespace in the local cluster", func() {
@@ -432,7 +446,7 @@ var _ = Describe("Provider race condition", func() {
 				case 1:
 					// Concurrently get a cluster.
 					_, err := p.Get(context.Background(), "cluster-1")
-					Expect(err).To(Or(BeNil(), MatchError("cluster cluster-1 not found")))
+					Expect(err).To(Or(BeNil(), MatchError(mcluster.ErrClusterNotFound)))
 				case 2:
 					// Concurrently list clusters.
 					p.ListClusters()
