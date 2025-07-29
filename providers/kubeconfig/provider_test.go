@@ -28,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/clientcmd/api"
@@ -79,6 +80,18 @@ var _ = Describe("Provider Namespace", Ordered, func() {
 			KubeconfigSecretLabel: kubeconfigSecretLabel,
 			Namespace:             kubeconfigSecretNamespace,
 			KubeconfigSecretKey:   kubeconfigSecretKey,
+			RESTOptions: []func(cfg *rest.Config) error{
+				func(cfg *rest.Config) error {
+					cfg.QPS = 100
+					cfg.Burst = 200
+					return nil
+				},
+			},
+			ClusterOptions: []cluster.Option{
+				func(clusterOptions *cluster.Options) {
+					clusterOptions.Scheme = scheme.Scheme
+				},
+			},
 		})
 
 		By("Creating a namespace in the local cluster", func() {
